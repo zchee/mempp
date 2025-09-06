@@ -1,18 +1,18 @@
 from .system import (
-    MempSystem,
-    MempSystemAPI,
-    MempSystemConfig,
-    EventType,
-    SystemEvent,
     EventBus,
+    EventType,
+    MemppSystem,
+    MemppSystemAPI,
+    MemppSystemConfig,
+    SystemEvent,
     TaskRequest,
     TaskResponse,
 )
 
 __all__ = [
-    "MempSystem",
-    "MempSystemAPI",
-    "MempSystemConfig",
+    "MemppSystem",
+    "MemppSystemAPI",
+    "MemppSystemConfig",
     "EventType",
     "SystemEvent",
     "EventBus",

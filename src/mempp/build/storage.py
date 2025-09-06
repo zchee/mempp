@@ -1,16 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 
 from .types import ProceduralMemory
-
-
-@dataclass
-class _NamespaceStats:
-    vector_count: int = 0
 
 
 class _IndexStats:
@@ -20,7 +14,7 @@ class _IndexStats:
     that code in update/system expects.
     """
 
-    def __init__(self, namespaces: Dict[str, Dict[str, int]]):
+    def __init__(self, namespaces: dict[str, dict[str, int]]):
         self.namespaces = namespaces
 
 
@@ -33,9 +27,9 @@ class PineconeMemoryStorage:
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         environment: str | None = None,
-        index_name: str = "memp-memories",
+        index_name: str = "mempp-memories",
         dimension: int = 1024,
         metric: str = "dotproduct",
         use_serverless: bool = True,
@@ -48,13 +42,13 @@ class PineconeMemoryStorage:
         self.use_serverless = use_serverless
 
         # Public for other modules (retrieve/update) to touch
-        self.memories: Dict[str, ProceduralMemory] = {}
-        self._vectors: Dict[str, Dict[str, np.ndarray]] = {  # namespace -> {id: vector}
+        self.memories: dict[str, ProceduralMemory] = {}
+        self._vectors: dict[str, dict[str, np.ndarray]] = {  # namespace -> {id: vector}
             "proceduralized": {},
             "script": {},
             "trajectory": {},
         }
-        self._metadata: Dict[str, Dict[str, Dict[str, Any]]] = {  # namespace -> id -> metadata
+        self._metadata: dict[str, dict[str, dict[str, Any]]] = {  # namespace -> id -> metadata
             "proceduralized": {},
             "script": {},
             "trajectory": {},
@@ -62,12 +56,12 @@ class PineconeMemoryStorage:
 
         # Minimal object that provides describe_index_stats()
         class _Index:
-            def __init__(inner_self, outer: "PineconeMemoryStorage") -> None:
-                inner_self._outer = outer
+            def __init__(self, outer: PineconeMemoryStorage) -> None:
+                self._outer = outer
 
-            def describe_index_stats(inner_self) -> _IndexStats:
-                namespaces: Dict[str, Dict[str, int]] = {}
-                for ns, table in inner_self._outer._vectors.items():
+            def describe_index_stats(self) -> _IndexStats:
+                namespaces: dict[str, dict[str, int]] = {}
+                for ns, table in self._outer._vectors.items():
                     namespaces[ns] = {"vector_count": len(table)}
                 return _IndexStats(namespaces)
 
@@ -90,7 +84,7 @@ class PineconeMemoryStorage:
         self._metadata.get(namespace, {}).pop(memory_id, None)
         self.memories.pop(memory_id, None)
 
-    def update_metadata(self, memory_id: str, metadata: Dict[str, Any], namespace: str = "proceduralized") -> None:
+    def update_metadata(self, memory_id: str, metadata: dict[str, Any], namespace: str = "proceduralized") -> None:
         ns_table = self._metadata.setdefault(namespace, {})
         base = ns_table.get(memory_id, {})
         base.update(metadata)
@@ -108,7 +102,7 @@ class PineconeMemoryStorage:
         vn = v / (np.linalg.norm(v) + 1e-12)
         return float(np.dot(qn, vn))
 
-    def _score_sparse(self, sparse_q: Optional[Dict[str, float]], sparse_v: Optional[Dict[str, float]]) -> float:
+    def _score_sparse(self, sparse_q: dict[str, float] | None, sparse_v: dict[str, float] | None) -> float:
         if not sparse_q or not sparse_v:
             return 0.0
         s = 0.0
@@ -122,12 +116,12 @@ class PineconeMemoryStorage:
         query_vector: np.ndarray,
         namespace: str,
         top_k: int,
-        sparse_vector: Optional[Dict[str, float]] = None,
-        filter: Optional[Dict[str, Any]] = None,
-    ) -> List[Dict[str, Any]]:
+        sparse_vector: dict[str, float] | None = None,
+        filter: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         # Collect candidates
         vecs = self._vectors.get(namespace, {})
-        candidates: List[Tuple[str, float]] = []
+        candidates: list[tuple[str, float]] = []
         for mid, vec in vecs.items():
             dense = self._score_dense(query_vector, vec)
 
@@ -165,7 +159,7 @@ class PineconeMemoryStorage:
         candidates.sort(key=lambda x: x[1], reverse=True)
         top = candidates[: max(0, top_k)]
 
-        results: List[Dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
         for mid, sc in top:
             results.append({
                 "id": mid,
@@ -176,8 +170,8 @@ class PineconeMemoryStorage:
 
     # ===== Stats =====
 
-    def get_statistics(self) -> Dict[str, Any]:
-        namespaces: Dict[str, Dict[str, int]] = {}
+    def get_statistics(self) -> dict[str, Any]:
+        namespaces: dict[str, dict[str, int]] = {}
         total = 0
         for ns, table in self._vectors.items():
             c = len(table)

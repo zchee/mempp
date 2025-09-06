@@ -6,16 +6,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, Union
+from typing import Any, Protocol, cast
 
-import numpy as np
-from pydantic import BaseModel, Field, ConfigDict
-from sentence_transformers import SentenceTransformer
-from pinecone import Pinecone, ServerlessSpec, PodSpec
-from pinecone_text.sparse import BM25Encoder
-from openai import OpenAI
 import anthropic
+import numpy as np
 import torch
+from openai import OpenAI
+from pinecone import Pinecone, PodSpec, ServerlessSpec
+from pinecone_text.sparse import BM25Encoder
+from pydantic import BaseModel, ConfigDict, Field
+from sentence_transformers import SentenceTransformer
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Configure logging
@@ -52,9 +52,10 @@ class Action:
     type: ActionType
     content: str
     timestamp: datetime
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation of the action."""
         return {
             "type": self.type.name,
             "content": self.content,
@@ -69,9 +70,10 @@ class State:
 
     description: str
     timestamp: datetime
-    attributes: Dict[str, Any] = field(default_factory=dict)
+    attributes: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation of the state."""
         return {"description": self.description, "timestamp": self.timestamp.isoformat(), "attributes": self.attributes}
 
 
@@ -81,10 +83,11 @@ class Observation:
 
     content: str
     timestamp: datetime
-    reward: Optional[float] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    reward: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation of the observation."""
         return {
             "content": self.content,
             "timestamp": self.timestamp.isoformat(),
@@ -99,22 +102,25 @@ class Trajectory:
 
     task_id: str
     task_description: str
-    states: List[State]
-    actions: List[Action]
-    observations: List[Observation]
+    states: list[State]
+    actions: list[Action]
+    observations: list[Observation]
     status: TaskStatus
     final_reward: float
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def length(self) -> int:
+        """Number of actions in the trajectory."""
         return len(self.actions)
 
     @property
     def total_reward(self) -> float:
+        """Sum of all observation rewards plus the final reward."""
         return sum(o.reward for o in self.observations if o.reward is not None) + self.final_reward
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation of the trajectory."""
         return {
             "task_id": self.task_id,
             "task_description": self.task_description,
@@ -137,9 +143,9 @@ class ProceduralMemory(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
     usage_count: int = 0
     success_rate: float = 0.0
-    embedding: Optional[np.ndarray] = None
-    sparse_embedding: Optional[Dict[str, float]] = None  # For hybrid search
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    embedding: np.ndarray | None = None
+    sparse_embedding: dict[str, float] | None = None  # For hybrid search
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     def increment_usage(self, success: bool):
         """Update usage statistics"""
@@ -148,30 +154,48 @@ class ProceduralMemory(BaseModel):
 
 
 class TrajectoryMemory(ProceduralMemory):
-    """Memory storing raw trajectory"""
+    """Memory storing raw trajectory.
+
+    Notes:
+        For built memories, `embedding` is always present. Override the
+        field type from Optional to `np.ndarray` so static type checkers
+        can rely on it being available at storage/query time.
+    """
 
     trajectory: Trajectory
-    key_states: List[State]
-    critical_actions: List[Action]
+    key_states: list[State]
+    critical_actions: list[Action]
+    # Embedding is guaranteed for built memories
+    embedding: np.ndarray | None = None
 
 
 class ScriptMemory(ProceduralMemory):
-    """Memory storing abstracted procedural script"""
+    """Memory storing abstracted procedural script.
+
+    As with `TrajectoryMemory`, ensure `embedding` is non-optional for
+    downstream consumers and tighter type safety.
+    """
 
     script: str
-    steps: List[str]
-    preconditions: List[str]
-    postconditions: List[str]
-    expected_outcomes: Dict[str, Any]
+    steps: list[str]
+    preconditions: list[str]
+    postconditions: list[str]
+    expected_outcomes: dict[str, Any]
+    embedding: np.ndarray | None = None
 
 
 class ProceduralizedMemory(ProceduralMemory):
-    """Combined trajectory and script memory"""
+    """Combined trajectory and script memory.
+
+    The embedding here is the combination of the trajectory and script
+    embeddings and is therefore guaranteed to be present.
+    """
 
     trajectory: Trajectory
     script: str
     abstraction_level: float  # 0.0 = concrete, 1.0 = abstract
-    key_patterns: List[Dict[str, Any]]
+    key_patterns: list[dict[str, Any]]
+    embedding: np.ndarray | None = None
 
 
 # ============= Embedding Models =============
@@ -180,18 +204,24 @@ class ProceduralizedMemory(ProceduralMemory):
 class EmbeddingModel(Protocol):
     """Protocol for embedding models"""
 
-    def encode(self, texts: Union[str, List[str]]) -> np.ndarray: ...
+    def encode(self, texts: str | list[str]) -> np.ndarray:
+        """Return embedding(s) for a string or list of strings."""
+        ...
 
 
 class MultilingualE5Embedder:
     """Multilingual E5 Large embedding model"""
 
     def __init__(self, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+        if torch.backends.mps.is_built():
+            device = "mps"
+
         self.model = SentenceTransformer("intfloat/multilingual-e5-large")
         self.model.to(device)
         self.device = device
 
-    def encode(self, texts: Union[str, List[str]]) -> np.ndarray:
+    def encode(self, texts: str | list[str]) -> np.ndarray:
+        """Encode input text(s) into L2-normalized dense embeddings."""
         if isinstance(texts, str):
             texts = [texts]
         embeddings = self.model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
@@ -201,12 +231,13 @@ class MultilingualE5Embedder:
 class OpenAIEmbedder:
     """OpenAI text-embedding-3-large model"""
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: str | None = None):
         self.client = OpenAI(api_key=api_key)
         self.model = "text-embedding-3-large"
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-    def encode(self, texts: Union[str, List[str]]) -> np.ndarray:
+    def encode(self, texts: str | list[str]) -> np.ndarray:
+        """Encode input text(s) using OpenAI embeddings API."""
         if isinstance(texts, str):
             texts = [texts]
 
@@ -222,7 +253,7 @@ class OpenAIEmbedder:
 class MemoryBuilder(ABC):
     """Abstract base class for memory builders"""
 
-    def __init__(self, embedder: EmbeddingModel, sparse_encoder: Optional[BM25Encoder] = None):
+    def __init__(self, embedder: EmbeddingModel, sparse_encoder: BM25Encoder | None = None):
         self.embedder = embedder
         self.sparse_encoder = sparse_encoder
 
@@ -241,12 +272,31 @@ class MemoryBuilder(ABC):
         pattern = f"{trajectory.task_description} -> {' -> '.join(key_actions)}"
         return pattern
 
-    def _create_sparse_embedding(self, text: str) -> Dict[str, float]:
-        """Create sparse embedding for hybrid search"""
-        if self.sparse_encoder:
-            # BM25 sparse encoding
-            sparse_dict = self.sparse_encoder.encode_documents([text])[0]
-            return sparse_dict
+    def _create_sparse_embedding(self, text: str) -> dict[str, float]:
+        """Create sparse embedding for hybrid search.
+
+        Different versions of ``pinecone_text.BM25Encoder`` return slightly
+        different shapes. Prefer a token->weight mapping, but gracefully
+        handle a SparseVector-like object exposing ``indices`` and ``values``.
+        """
+        if not self.sparse_encoder:
+            return {}
+
+        raw: Any = self.sparse_encoder.encode_documents([text])
+
+        # Common case: list[dict[str, float]]
+        if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+            return cast(dict[str, float], raw[0])
+
+        # Fallback: SparseVector-like object with indices/values
+        if hasattr(raw, "indices") and hasattr(raw, "values"):
+            indices = getattr(raw, "indices")
+            values = getattr(raw, "values")
+            try:
+                return {str(i): float(v) for i, v in zip(indices, values)}
+            except Exception:
+                return {}
+
         return {}
 
 
@@ -285,7 +335,7 @@ class TrajectoryBuilder(MemoryBuilder):
 
         return memory
 
-    def _extract_key_states(self, trajectory: Trajectory) -> List[State]:
+    def _extract_key_states(self, trajectory: Trajectory) -> list[State]:
         """Extract important states from trajectory"""
         if len(trajectory.states) <= 3:
             return trajectory.states
@@ -293,7 +343,7 @@ class TrajectoryBuilder(MemoryBuilder):
         indices = [0, len(trajectory.states) // 2, -1]
         return [trajectory.states[i] for i in indices]
 
-    def _extract_critical_actions(self, trajectory: Trajectory) -> List[Action]:
+    def _extract_critical_actions(self, trajectory: Trajectory) -> list[Action]:
         """Extract critical actions from trajectory"""
         critical = [a for a in trajectory.actions if a.type in [ActionType.TOOL_USE, ActionType.PLANNING]]
 
@@ -307,7 +357,7 @@ class ScriptBuilder(MemoryBuilder):
     """Builds memory by abstracting trajectories into scripts"""
 
     def __init__(
-        self, embedder: EmbeddingModel, sparse_encoder: Optional[BM25Encoder] = None, llm_client: Optional[Any] = None
+        self, embedder: EmbeddingModel, sparse_encoder: BM25Encoder | None = None, llm_client: Any | None = None
     ):
         super().__init__(embedder, sparse_encoder)
         self.llm_client = llm_client or anthropic.Anthropic()
@@ -348,22 +398,25 @@ class ScriptBuilder(MemoryBuilder):
         """Generate abstract script using LLM"""
         prompt = f"""
         Analyze this task trajectory and create an abstract procedural script.
-        
+
         Task: {trajectory.task_description}
         Actions taken: {[a.content for a in trajectory.actions[:10]]}
         Final status: {trajectory.status.name}
-        
+
         Generate a concise, reusable script that captures the essential procedure.
         Focus on the general pattern, not specific details.
         """
 
         response = self.llm_client.messages.create(
-            model="claude-3-5-sonnet-20241022", max_tokens=500, messages=[{"role": "user", "content": prompt}]
+            model="claude-sonnet-4-20250514", max_tokens=500, messages=[{"role": "user", "content": prompt}]
         )
 
-        return response.content[0].text
+        # Only text blocks include ``text``; ignore tool/thinking blocks.
+        blocks = getattr(response, "content", [])
+        texts = [str(getattr(b, "text", "")) for b in blocks if getattr(b, "text", None)]
+        return "\n".join(texts) if texts else ""
 
-    def _extract_steps(self, trajectory: Trajectory) -> List[str]:
+    def _extract_steps(self, trajectory: Trajectory) -> list[str]:
         """Extract high-level steps from trajectory"""
         steps = []
         for i, action in enumerate(trajectory.actions):
@@ -372,21 +425,21 @@ class ScriptBuilder(MemoryBuilder):
                 steps.append(step)
         return steps
 
-    def _extract_preconditions(self, trajectory: Trajectory) -> List[str]:
+    def _extract_preconditions(self, trajectory: Trajectory) -> list[str]:
         """Extract task preconditions"""
         if trajectory.states:
             first_state = trajectory.states[0]
             return [f"Initial state: {first_state.description}"]
         return []
 
-    def _extract_postconditions(self, trajectory: Trajectory) -> List[str]:
+    def _extract_postconditions(self, trajectory: Trajectory) -> list[str]:
         """Extract task postconditions"""
         if trajectory.states:
             last_state = trajectory.states[-1]
             return [f"Final state: {last_state.description}"]
         return []
 
-    def _extract_success_indicators(self, trajectory: Trajectory) -> List[str]:
+    def _extract_success_indicators(self, trajectory: Trajectory) -> list[str]:
         """Extract success indicators from successful trajectories"""
         if trajectory.status != TaskStatus.SUCCESS:
             return []
@@ -397,13 +450,12 @@ class ScriptBuilder(MemoryBuilder):
                 indicators.append(obs.content)
         return indicators[-3:] if indicators else []
 
-    def _extract_failure_patterns(self, trajectory: Trajectory) -> List[str]:
+    def _extract_failure_patterns(self, trajectory: Trajectory) -> list[str]:
         """Extract common failure patterns"""
         patterns = []
         for i, obs in enumerate(trajectory.observations):
-            if obs.reward and obs.reward < 0:
-                if i < len(trajectory.actions):
-                    patterns.append(f"Avoid: {trajectory.actions[i].content}")
+            if (obs.reward and obs.reward < 0) and (i < len(trajectory.actions)):
+                patterns.append(f"Avoid: {trajectory.actions[i].content}")
         return patterns[:3]
 
 
@@ -413,9 +465,9 @@ class ProceduralizationBuilder(MemoryBuilder):
     def __init__(
         self,
         embedder: EmbeddingModel,
-        sparse_encoder: Optional[BM25Encoder] = None,
-        trajectory_builder: TrajectoryBuilder = None,
-        script_builder: ScriptBuilder = None,
+        sparse_encoder: BM25Encoder | None = None,
+        trajectory_builder: TrajectoryBuilder | None = None,
+        script_builder: ScriptBuilder | None = None,
     ):
         super().__init__(embedder, sparse_encoder)
         self.trajectory_builder = trajectory_builder or TrajectoryBuilder(embedder, sparse_encoder)
@@ -435,10 +487,15 @@ class ProceduralizationBuilder(MemoryBuilder):
         abstraction_level = self._calculate_abstraction_level(trajectory)
 
         # Combine embeddings (weighted average)
-        combined_embedding = (trajectory_memory.embedding + script_memory.embedding) / 2
+        # Both embeddings are guaranteed (see memory classes), but guard defensively.
+        t_emb = trajectory_memory.embedding
+        s_emb = script_memory.embedding
+        if t_emb is None or s_emb is None:
+            raise ValueError("Missing embeddings to combine for proceduralized memory")
+        combined_embedding = (t_emb + s_emb) / 2
 
         # Combine sparse embeddings
-        combined_sparse = {}
+        combined_sparse: dict[str, float] = {}
         if trajectory_memory.sparse_embedding and script_memory.sparse_embedding:
             all_keys = set(trajectory_memory.sparse_embedding.keys()) | set(script_memory.sparse_embedding.keys())
             for key in all_keys:
@@ -466,7 +523,7 @@ class ProceduralizationBuilder(MemoryBuilder):
 
         return memory
 
-    def _extract_key_patterns(self, traj_mem: TrajectoryMemory, script_mem: ScriptMemory) -> List[Dict[str, Any]]:
+    def _extract_key_patterns(self, traj_mem: TrajectoryMemory, script_mem: ScriptMemory) -> list[dict[str, Any]]:
         """Extract key patterns from both memory types"""
         patterns = []
 
@@ -494,7 +551,7 @@ class PineconeMemoryStorage:
         self,
         api_key: str,
         environment: str = "us-east-1",
-        index_name: str = "memp-memories",
+        index_name: str = "mempp-memories",
         dimension: int = 1024,
         metric: str = "dotproduct",
         use_serverless: bool = True,
@@ -512,7 +569,7 @@ class PineconeMemoryStorage:
         self.sparse_encoder.fit(["sample text for initialization"])
 
         # Local cache for memory objects
-        self.memories: Dict[str, ProceduralMemory] = {}
+        self.memories: dict[str, ProceduralMemory] = {}
 
         logger.info(f"Pinecone storage initialized with index: {index_name}")
 
@@ -535,7 +592,7 @@ class PineconeMemoryStorage:
         # Connect to index
         self.index = self.pc.Index(self.index_name)
 
-    async def store(self, memory: ProceduralMemory, namespace: Optional[str] = None) -> str:
+    async def store(self, memory: ProceduralMemory, namespace: str | None = None) -> str:
         """Store procedural memory in Pinecone"""
 
         memory_id = memory.memory_id
@@ -564,6 +621,10 @@ class PineconeMemoryStorage:
 
         # Prepare vector for upsert
         vectors = []
+
+        # Ensure embedding exists before serializing
+        if memory.embedding is None:
+            raise ValueError("Embedding is required to store memory in Pinecone")
 
         # Handle hybrid search (dense + sparse vectors)
         if memory.sparse_embedding:
@@ -597,7 +658,7 @@ class PineconeMemoryStorage:
 
     async def _persist_memory(self, memory: ProceduralMemory):
         """Persist memory to disk as backup"""
-        storage_path = Path("./memp_storage")
+        storage_path = Path("./mempp_storage")
         storage_path.mkdir(parents=True, exist_ok=True)
 
         memory_file = storage_path / f"{memory.memory_id}.json"
@@ -607,6 +668,8 @@ class PineconeMemoryStorage:
 
         # Save embeddings separately
         embedding_file = storage_path / f"{memory.memory_id}.npy"
+        if memory.embedding is None:
+            raise ValueError("Embedding is required to persist memory to disk")
         np.save(embedding_file, memory.embedding)
 
         with open(memory_file, "w") as f:
@@ -617,10 +680,10 @@ class PineconeMemoryStorage:
         query_vector: np.ndarray,
         namespace: str = "proceduralized",
         top_k: int = 5,
-        filter: Optional[Dict] = None,
+        filter: dict | None = None,
         include_metadata: bool = True,
-        sparse_vector: Optional[Dict[str, float]] = None,
-    ) -> List[Dict]:
+        sparse_vector: dict[str, float] | None = None,
+    ) -> list[dict]:
         """Query Pinecone index"""
 
         # Prepare query
@@ -644,9 +707,10 @@ class PineconeMemoryStorage:
             query_params["filter"] = filter
 
         # Execute query
-        results = self.index.query(**query_params)
+        results: Any = self.index.query(**query_params)
 
-        return results.matches
+        matches = getattr(results, "matches", results)
+        return cast(list[dict[str, Any]], matches)
 
     def delete(self, memory_id: str, namespace: str = "proceduralized"):
         """Delete memory from Pinecone"""
@@ -657,11 +721,11 @@ class PineconeMemoryStorage:
 
         logger.info(f"Deleted memory: {memory_id} from namespace: {namespace}")
 
-    def update_metadata(self, memory_id: str, metadata: Dict, namespace: str = "proceduralized"):
+    def update_metadata(self, memory_id: str, metadata: dict, namespace: str = "proceduralized"):
         """Update memory metadata in Pinecone"""
         self.index.update(id=memory_id, set_metadata=metadata, namespace=namespace)
 
-    def get_statistics(self) -> Dict[str, Any]:
+    def get_statistics(self) -> dict[str, Any]:
         """Get storage statistics from Pinecone"""
         stats = self.index.describe_index_stats()
 
@@ -677,17 +741,17 @@ class PineconeMemoryStorage:
 # ============= Main Build Pipeline =============
 
 
-class MempBuildPipeline:
+class MemppBuildPipeline:
     """Main pipeline for building procedural memories with Pinecone"""
 
     def __init__(
         self,
         pinecone_api_key: str,
-        embedder: Optional[EmbeddingModel] = None,
-        storage: Optional[PineconeMemoryStorage] = None,
-        llm_client: Optional[Any] = None,
+        embedder: EmbeddingModel | None = None,
+        storage: PineconeMemoryStorage | None = None,
+        llm_client: Any | None = None,
     ):
-        self.embedder = embedder or MultilingualE5Embedder()
+        self.embedder: EmbeddingModel = embedder or MultilingualE5Embedder()
         self.storage = storage or PineconeMemoryStorage(api_key=pinecone_api_key)
         self.llm_client = llm_client
 
@@ -711,17 +775,21 @@ class MempBuildPipeline:
         start_time = datetime.now()
 
         try:
-            if strategy == "trajectory":
-                memory = await self.trajectory_builder.build(trajectory)
-                namespace = "trajectory"
-            elif strategy == "script":
-                memory = await self.script_builder.build(trajectory)
-                namespace = "script"
-            elif strategy == "proceduralization":
-                memory = await self.proceduralization_builder.build(trajectory)
-                namespace = "proceduralized"
-            else:
-                raise ValueError(f"Unknown build strategy: {strategy}")
+            match strategy:
+                case "trajectory":
+                    memory = await self.trajectory_builder.build(trajectory)
+                    namespace = "trajectory"
+
+                case "script":
+                    memory = await self.script_builder.build(trajectory)
+                    namespace = "script"
+
+                case "proceduralization":
+                    memory = await self.proceduralization_builder.build(trajectory)
+                    namespace = "proceduralized"
+
+                case _:
+                    raise ValueError(f"Unknown build strategy: {strategy}")
 
             # Store in Pinecone
             await self.storage.store(memory, namespace=namespace)
@@ -742,8 +810,8 @@ class MempBuildPipeline:
             raise
 
     async def batch_build(
-        self, trajectories: List[Trajectory], strategy: str = "proceduralization", filter_successful: bool = True
-    ) -> List[ProceduralMemory]:
+        self, trajectories: list[Trajectory], strategy: str = "proceduralization", filter_successful: bool = True
+    ) -> list[ProceduralMemory]:
         """Build memories from multiple trajectories"""
 
         if filter_successful:
@@ -767,7 +835,7 @@ class MempBuildPipeline:
         logger.info(f"Built {len(memories)} memories from {len(trajectories)} trajectories")
         return memories
 
-    def get_build_statistics(self) -> Dict[str, Any]:
+    def get_build_statistics(self) -> dict[str, Any]:
         """Get build pipeline statistics"""
         avg_build_time = (
             sum(self.build_stats["build_times"]) / len(self.build_stats["build_times"])

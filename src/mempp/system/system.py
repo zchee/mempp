@@ -2,44 +2,47 @@ import asyncio
 import json
 import uuid
 from collections import defaultdict, deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Protocol
+from typing import Any, Protocol
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
-import numpy as np
-from pinecone_text.sparse import BM25Encoder
 import anthropic
-from aiokafka import AIOKafkaProducer
-import ray
-from prometheus_client import Counter, Histogram, Gauge, Summary
-import structlog
-from fastapi import FastAPI
-import uvicorn
+import numpy as np
 import psutil
+import ray
+import structlog
+import uvicorn
 import yaml
+from aiokafka import AIOKafkaProducer, AIOKafkaConsumer
+from fastapi import FastAPI
+from pinecone_text.sparse import BM25Encoder
+from prometheus_client import Counter, Gauge, Histogram, Summary
 
 # Import all components with Pinecone integration
 from mempp.build import (
-    ProceduralMemory,
-    PineconeMemoryStorage,
-    Trajectory,
-    TaskStatus,
     Action,
-    State,
-    Observation,
     ActionType,
-    MempBuildPipeline,
+    MemppBuildPipeline,
     MultilingualE5Embedder,
+    Observation,
+    PineconeMemoryStorage,
+    ProceduralMemory,
+    State,
+    TaskStatus,
+    Trajectory,
 )
 from mempp.retrieve import (
-    MempRetrievalPipeline,
-    RetrievalResult,
+    MemppRetrievalPipeline,
     RetrievalConfig,
+    RetrievalResult,
     RetrievalStrategy,
 )
-from mempp.update import MempUpdatePipeline, UpdateConfig, UpdateStrategy, UpdateResult
+from mempp.update import MemppUpdatePipeline, UpdateConfig, UpdateResult, UpdateStrategy
 
 # Configure structured logging
 structlog.configure(
@@ -69,7 +72,7 @@ class TaskExecutor(Protocol):
     """Protocol for task execution"""
 
     async def execute(
-        self, task_description: str, memory_context: Optional[List[RetrievalResult]] = None
+        self, task_description: str, memory_context: list[RetrievalResult] | None = None
     ) -> Trajectory: ...
 
 
@@ -79,11 +82,11 @@ class TaskRequest:
 
     task_id: str
     description: str
-    context: Dict[str, Any] = field(default_factory=dict)
+    context: dict[str, Any] = field(default_factory=dict)
     priority: int = 0
-    timeout: Optional[float] = None
-    preferred_namespace: Optional[str] = None  # Pinecone namespace preference
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    timeout: float | None = None
+    preferred_namespace: str | None = None  # Pinecone namespace preference
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.task_id:
@@ -96,32 +99,32 @@ class TaskResponse:
 
     task_id: str
     status: TaskStatus
-    trajectory: Optional[Trajectory]
-    retrieved_memories: List[RetrievalResult]
-    built_memory: Optional[ProceduralMemory]
-    update_results: List[UpdateResult]
+    trajectory: Trajectory | None
+    retrieved_memories: list[RetrievalResult]
+    built_memory: ProceduralMemory | None
+    update_results: list[UpdateResult]
     execution_time: float
-    namespaces_used: List[str] = field(default_factory=list)  # Pinecone namespaces accessed
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    namespaces_used: list[str] = field(default_factory=list)  # Pinecone namespaces accessed
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 # ============= Configuration Management =============
 
 
 @dataclass
-class MempSystemConfig:
+class MemppSystemConfig:
     """Complete system configuration with Pinecone settings"""
 
     # Pinecone configuration
     pinecone_api_key: str
     pinecone_environment: str = "us-east-1"
-    pinecone_index_name: str = "memp-memories"
+    pinecone_index_name: str = "mempp-memories"
     pinecone_metric: str = "dotproduct"
     pinecone_use_serverless: bool = True
     pinecone_dimension: int = 1024
 
     # Namespace configuration
-    default_namespaces: List[str] = field(default_factory=lambda: ["proceduralized", "script", "trajectory"])
+    default_namespaces: list[str] = field(default_factory=lambda: ["proceduralized", "script", "trajectory"])
     namespace_auto_balance: bool = True
     max_vectors_per_namespace: int = 5000
 
@@ -150,13 +153,13 @@ class MempSystemConfig:
     # System configuration
     enable_metrics: bool = True
     enable_distributed: bool = False
-    redis_url: Optional[str] = None
-    kafka_brokers: Optional[List[str]] = None
+    redis_url: str | None = None
+    kafka_brokers: list[str] | None = None
 
     # API keys
-    openai_api_key: Optional[str] = None
-    anthropic_api_key: Optional[str] = None
-    gemini_api_key: Optional[str] = None
+    openai_api_key: str | None = None
+    anthropic_api_key: str | None = None
+    gemini_api_key: str | None = None
 
     # Performance
     max_concurrent_tasks: int = 10
@@ -164,9 +167,9 @@ class MempSystemConfig:
     batch_size: int = 20
 
     @classmethod
-    def from_yaml(cls, path: Path) -> "MempSystemConfig":
+    def from_yaml(cls, path: Path) -> "MemppSystemConfig":
         """Load configuration from YAML file"""
-        with open(path, "r") as f:
+        with open(path) as f:
             config_dict = yaml.safe_load(f)
         return cls(**config_dict)
 
@@ -202,10 +205,10 @@ class SystemEvent:
 
     event_type: EventType
     timestamp: datetime
-    data: Dict[str, Any]
+    data: dict[str, Any]
     source: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "event_type": self.event_type.name,
             "timestamp": self.timestamp.isoformat(),
@@ -217,11 +220,11 @@ class SystemEvent:
 class EventBus:
     """Event bus for system-wide communication"""
 
-    def __init__(self, kafka_brokers: Optional[List[str]] = None):
+    def __init__(self, kafka_brokers: list[str] | None = None):
         self.listeners = defaultdict(list)
         self.kafka_brokers = kafka_brokers
-        self.producer = None
-        self.consumer = None
+        self.producer: AIOKafkaProducer | None = None
+        self.consumer: AIOKafkaConsumer | None = None
 
     async def initialize(self):
         """Initialize event bus"""
@@ -272,9 +275,7 @@ class SimulatedTaskExecutor(TaskExecutor):
     def __init__(self, success_rate: float = 0.8):
         self.success_rate = success_rate
 
-    async def execute(
-        self, task_description: str, memory_context: Optional[List[RetrievalResult]] = None
-    ) -> Trajectory:
+    async def execute(self, task_description: str, memory_context: list[RetrievalResult] | None = None) -> Trajectory:
         """Simulate task execution"""
 
         await asyncio.sleep(np.random.uniform(0.5, 2.0))
@@ -321,12 +322,10 @@ class SimulatedTaskExecutor(TaskExecutor):
 class LLMTaskExecutor(TaskExecutor):
     """LLM-based task executor"""
 
-    def __init__(self, llm_client: Optional[Any] = None):
+    def __init__(self, llm_client: Any | None = None):
         self.llm_client = llm_client or anthropic.Anthropic()
 
-    async def execute(
-        self, task_description: str, memory_context: Optional[List[RetrievalResult]] = None
-    ) -> Trajectory:
+    async def execute(self, task_description: str, memory_context: list[RetrievalResult] | None = None) -> Trajectory:
         """Execute task using LLM"""
 
         # Build context from memories
@@ -348,12 +347,14 @@ class LLMTaskExecutor(TaskExecutor):
 
         response = await asyncio.to_thread(
             self.llm_client.messages.create,
-            model="claude-3-5-sonnet-20241022",
+            model="claude-sonnet-4-20250514",
             max_tokens=1000,
             messages=[{"role": "user", "content": prompt}],
         )
 
-        return self._parse_llm_response(response.content[0].text, task_description)
+        blocks = getattr(response, "content", [])
+        text = "\n".join([str(getattr(b, "text", "")) for b in blocks if getattr(b, "text", None)])
+        return self._parse_llm_response(text, task_description)
 
     def _parse_llm_response(self, response: str, task_description: str) -> Trajectory:
         """Parse LLM response into trajectory"""
@@ -382,13 +383,13 @@ class LLMTaskExecutor(TaskExecutor):
         )
 
 
-# ============= Core MempSystem with Pinecone =============
+# ============= Core MemppSystem with Pinecone =============
 
 
-class MempSystem:
-    """Core system integrating all Memp components with Pinecone"""
+class MemppSystem:
+    """Core system integrating all Mempp components with Pinecone"""
 
-    def __init__(self, config: MempSystemConfig, task_executor: Optional[TaskExecutor] = None):
+    def __init__(self, config: MemppSystemConfig, task_executor: TaskExecutor | None = None):
         self.config = config
         self.task_executor = task_executor or SimulatedTaskExecutor()
 
@@ -414,7 +415,7 @@ class MempSystem:
 
         # Task management
         self.task_queue = asyncio.Queue(maxsize=1000)
-        self.active_tasks = {}
+        self.active_tasks: dict[str, asyncio.Task[TaskResponse]] = {}
         self.task_history = deque(maxlen=10000)
 
         # Metrics
@@ -426,7 +427,7 @@ class MempSystem:
         self.workers = []
 
         # Statistics
-        self.stats = {
+        self.stats: dict[str, Any] = {
             "total_tasks": 0,
             "successful_tasks": 0,
             "failed_tasks": 0,
@@ -446,7 +447,7 @@ class MempSystem:
         """Initialize component pipelines with Pinecone"""
 
         # Build pipeline
-        self.build_pipeline = MempBuildPipeline(
+        self.build_pipeline = MemppBuildPipeline(
             pinecone_api_key=self.config.pinecone_api_key,
             embedder=self.embedder,
             storage=self.storage,
@@ -465,7 +466,7 @@ class MempSystem:
             alpha=self.config.alpha,
         )
 
-        self.retrieval_pipeline = MempRetrievalPipeline(
+        self.retrieval_pipeline = MemppRetrievalPipeline(
             storage=self.storage,
             config=retrieval_config,
             embedder=self.embedder,
@@ -486,7 +487,7 @@ class MempSystem:
             enable_metrics=self.config.enable_metrics,
         )
 
-        self.update_pipeline = MempUpdatePipeline(
+        self.update_pipeline = MemppUpdatePipeline(
             storage=self.storage,
             build_pipeline=self.build_pipeline,
             retrieval_pipeline=self.retrieval_pipeline,
@@ -549,6 +550,7 @@ class MempSystem:
             logger.info("Retrieving memories from Pinecone", task_id=request.task_id)
 
             # Use preferred namespace if specified
+            original_namespaces: list[str] | None = None
             if request.preferred_namespace:
                 original_namespaces = self.retrieval_pipeline.config.search_namespaces
                 self.retrieval_pipeline.config.search_namespaces = [request.preferred_namespace]
@@ -562,7 +564,7 @@ class MempSystem:
             )
 
             # Restore original namespaces
-            if request.preferred_namespace:
+            if original_namespaces is not None:
                 self.retrieval_pipeline.config.search_namespaces = original_namespaces
 
             # Track namespaces used
@@ -570,9 +572,9 @@ class MempSystem:
 
             # Log retrieval scores
             if retrieved_memories:
-                avg_score = np.mean([r.score for r in retrieved_memories])
+                avg_score = float(np.mean([r.score for r in retrieved_memories]))
                 if self.config.enable_metrics:
-                    self.retrieval_score.observe(avg_score)
+                    self.retrieval_score.observe(float(avg_score))
                 logger.info(
                     f"Retrieved {len(retrieved_memories)} memories", avg_score=avg_score, namespaces=namespaces_used
                 )
@@ -680,7 +682,7 @@ class MempSystem:
                 metadata={"error": str(e)},
             )
 
-    def _update_statistics(self, trajectory: Trajectory, execution_time: float, namespaces: List[str]):
+    def _update_statistics(self, trajectory: Trajectory, execution_time: float, namespaces: list[str]):
         """Update system statistics"""
         self.stats["total_tasks"] += 1
 
@@ -737,7 +739,7 @@ class MempSystem:
 
         logger.info("Pinecone index optimization completed")
 
-    async def migrate_namespace(self, from_namespace: str, to_namespace: str, criteria: Optional[Dict] = None):
+    async def migrate_namespace(self, from_namespace: str, to_namespace: str, criteria: dict | None = None):
         """Migrate memories between Pinecone namespaces"""
         logger.info(f"Migrating from {from_namespace} to {to_namespace}")
 
@@ -773,12 +775,36 @@ class MempSystem:
 
         return []
 
+    async def submit_task(self, request: TaskRequest) -> str:
+        """Submit a task for background processing and return its ID."""
+        task = asyncio.create_task(self.process_task(request))
+        self.active_tasks[request.task_id] = task
+        return request.task_id
+
+    async def get_task_result(self, task_id: str) -> TaskResponse | None:
+        """Return task result if available; otherwise None."""
+        task = self.active_tasks.get(task_id)
+        if task is None:
+            return None
+        if task.done():
+            try:
+                result = task.result()
+            finally:
+                self.active_tasks.pop(task_id, None)
+            return result
+        return None
+
     # ============= System Management =============
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         """Perform system health check including Pinecone status"""
 
-        health = {"status": "healthy", "timestamp": datetime.now().isoformat(), "components": {}, "metrics": {}}
+        health: dict[str, Any] = {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "components": {},
+            "metrics": {},
+        }
 
         # Check Pinecone storage
         try:
@@ -812,8 +838,8 @@ class MempSystem:
 
         # System metrics
         health["metrics"] = {
-            "total_tasks": self.stats["total_tasks"],
-            "success_rate": (self.stats["successful_tasks"] / max(1, self.stats["total_tasks"])),
+            "total_tasks": int(self.stats["total_tasks"]),
+            "success_rate": (int(self.stats["successful_tasks"]) / max(1, int(self.stats["total_tasks"]))),
             "namespace_distribution": dict(self.stats["namespace_distribution"]),
             "active_tasks": len(self.active_tasks),
             "queue_size": self.task_queue.qsize(),
@@ -825,7 +851,7 @@ class MempSystem:
 
         return health
 
-    def get_statistics(self) -> Dict[str, Any]:
+    def get_statistics(self) -> dict[str, Any]:
         """Get comprehensive system statistics"""
 
         pinecone_stats = self.storage.get_statistics()
@@ -839,7 +865,7 @@ class MempSystem:
             "queue": {"size": self.task_queue.qsize(), "active_tasks": len(self.active_tasks)},
         }
 
-    async def shutdown(self):
+    async def shutdown(self) -> None:
         """Gracefully shutdown the system"""
 
         logger.info("Shutting down MempSystem")
@@ -874,25 +900,36 @@ class MempSystem:
 # ============= REST API =============
 
 
-class MempSystemAPI:
+class MemppSystemAPI:
     """FastAPI wrapper for MempSystem with Pinecone endpoints"""
 
-    def __init__(self, memp_system: MempSystem):
+    def __init__(self, memp_system: MemppSystem):
         self.system = memp_system
-        self.app = FastAPI(title="MempSystem API with Pinecone", version="2.0.0")
+
+        @asynccontextmanager
+        async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+            # Initialize system on startup
+            await self.system.initialize()
+            try:
+                yield
+            finally:
+                # Cleanup on shutdown
+                await self.system.shutdown()
+
+        self.app = FastAPI(title="MemppSystem API with Pinecone", version="0.0.1", lifespan=lifespan)
         self._setup_routes()
 
-    def _setup_routes(self):
+    def _setup_routes(self) -> None:
         """Setup API routes"""
 
         @self.app.post("/task")
-        async def submit_task(request: TaskRequest) -> Dict[str, str]:
+        async def submit_task(request: TaskRequest) -> dict[str, str]:
             """Submit a task for processing"""
             task_id = await self.system.submit_task(request)
             return {"task_id": task_id, "status": "submitted"}
 
         @self.app.get("/task/{task_id}")
-        async def get_task_result(task_id: str) -> Dict[str, Any]:
+        async def get_task_result(task_id: str) -> dict[str, Any]:
             """Get task result"""
             result = await self.system.get_task_result(task_id)
             if result:
@@ -906,38 +943,28 @@ class MempSystemAPI:
             return {"error": "Task not found or still processing"}
 
         @self.app.post("/migrate")
-        async def migrate_namespace(from_ns: str, to_ns: str, criteria: Optional[Dict] = None) -> Dict[str, Any]:
+        async def migrate_namespace(from_ns: str, to_ns: str, criteria: dict[str, Any] | None = None) -> dict[str, Any]:
             """Migrate memories between Pinecone namespaces"""
             results = await self.system.migrate_namespace(from_ns, to_ns, criteria)
             return {"migrated": len(results), "from": from_ns, "to": to_ns}
 
         @self.app.post("/optimize")
-        async def optimize_index() -> Dict[str, str]:
+        async def optimize_index() -> dict[str, str]:
             """Optimize Pinecone index"""
             await self.system.optimize_pinecone_index()
             return {"status": "optimization completed"}
 
         @self.app.get("/health")
-        async def health_check() -> Dict[str, Any]:
+        async def health_check() -> dict[str, Any]:
             """System health check"""
             return await self.system.health_check()
 
         @self.app.get("/stats")
-        async def get_statistics() -> Dict[str, Any]:
+        async def get_statistics() -> dict[str, Any]:
             """Get system statistics"""
             return self.system.get_statistics()
 
-        @self.app.on_event("startup")
-        async def startup():
-            """Initialize system on startup"""
-            await self.system.initialize()
-
-        @self.app.on_event("shutdown")
-        async def shutdown():
-            """Cleanup on shutdown"""
-            await self.system.shutdown()
-
-    def run(self, host: str = "0.0.0.0", port: int = 8000):
+    def run(self, host: str = "0.0.0.0", port: int = 8000) -> None:
         """Run the API server"""
         uvicorn.run(self.app, host=host, port=port)
 
@@ -945,16 +972,16 @@ class MempSystemAPI:
 # ============= Example Usage =============
 
 
-async def example_usage():
+async def example_usage() -> None:
     """Comprehensive example of MempSystem with Pinecone"""
 
     import os
 
     # Create configuration
-    config = MempSystemConfig(
+    config = MemppSystemConfig(
         pinecone_api_key=os.getenv("PINECONE_API_KEY", "your-api-key"),
         pinecone_environment="us-east-1",
-        pinecone_index_name="memp-demo",
+        pinecone_index_name="mempp-demo",
         retrieval_strategy=RetrievalStrategy.CASCADING,
         update_strategy=UpdateStrategy.ADJUSTMENT,
         continuous_learning=True,
@@ -963,7 +990,7 @@ async def example_usage():
     )
 
     # Initialize system
-    system = MempSystem(config=config)
+    system = MemppSystem(config=config)
     await system.initialize()
 
     print("=== MempSystem with Pinecone Demo ===\n")
@@ -1035,13 +1062,13 @@ async def example_usage():
 # ============= CLI Interface =============
 
 
-async def main():
+async def main() -> None:
     """Main entry point with CLI interface"""
 
     import argparse
     import os
 
-    parser = argparse.ArgumentParser(description="MempSystem with Pinecone - Agent Procedural Memory Framework")
+    parser = argparse.ArgumentParser(description="MemppSystem with Pinecone - Agent Procedural Memory Framework")
     parser.add_argument("--config", type=str, help="Path to configuration file")
     parser.add_argument("--mode", choices=["demo", "api", "worker"], default="demo", help="Execution mode")
     parser.add_argument("--port", type=int, default=8000, help="API server port")
@@ -1051,7 +1078,7 @@ async def main():
 
     # Load configuration
     if args.config:
-        config = MempSystemConfig.from_yaml(Path(args.config))
+        config = MemppSystemConfig.from_yaml(Path(args.config))
     else:
         # Use environment variable or command line argument for Pinecone key
         pinecone_key = args.pinecone_key or os.getenv("PINECONE_API_KEY")
@@ -1059,32 +1086,33 @@ async def main():
             print("Error: Pinecone API key required. Set PINECONE_API_KEY or use --pinecone-key")
             return
 
-        config = MempSystemConfig(pinecone_api_key=pinecone_key)
+        config = MemppSystemConfig(pinecone_api_key=pinecone_key)
 
     # Initialize system
-    system = MempSystem(config=config)
+    system = MemppSystem(config=config)
 
-    if args.mode == "demo":
-        # Run demo
-        await example_usage()
+    match args.mode:
+        case "demo":
+            # Run demo
+            await example_usage()
 
-    elif args.mode == "api":
-        # Start API server
-        api = MempSystemAPI(system)
-        api.run(port=args.port)
+        case "api":
+            # Start API server
+            api = MemppSystemAPI(system)
+            api.run(port=args.port)
 
-    elif args.mode == "worker":
-        # Run as worker
-        await system.initialize()
+        case "worker":
+            # Run as worker
+            await system.initialize()
 
-        # Keep running
-        try:
-            while True:
-                await asyncio.sleep(60)
-                health = await system.health_check()
-                logger.info("Health check", status=health["status"])
-        except KeyboardInterrupt:
-            await system.shutdown()
+    # Keep running
+    try:
+        while True:
+            await asyncio.sleep(60)
+            health = await system.health_check()
+            logger.info("Health check", status=health["status"])
+    except KeyboardInterrupt:
+        await system.shutdown()
 
 
 if __name__ == "__main__":

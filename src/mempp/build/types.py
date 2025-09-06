@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
-from typing import Any, Dict, List, Optional, Protocol, Sequence
+from typing import Any, Protocol
 
 import numpy as np
-
 
 # ===== Task/Trajectory primitives =====
 
@@ -48,12 +48,12 @@ class Observation:
 class Trajectory:
     task_id: str
     task_description: str
-    states: List[State]
-    actions: List[Action]
-    observations: List[Observation]
+    states: list[State]
+    actions: list[Action]
+    observations: list[Observation]
     status: TaskStatus
     final_reward: float
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 # ===== Memory objects =====
@@ -64,11 +64,11 @@ class ProceduralMemory:
     memory_id: str
     task_pattern: str
     embedding: np.ndarray
-    sparse_embedding: Optional[Dict[str, float]] = None
+    sparse_embedding: dict[str, float] | None = None
     created_at: datetime = field(default_factory=datetime.now)
     usage_count: int = 0
     success_rate: float = 0.0
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def increment_usage(self, success: bool) -> None:
         self.usage_count += 1
@@ -80,25 +80,25 @@ class ProceduralMemory:
 @dataclass
 class TrajectoryMemory(ProceduralMemory):
     trajectory: Trajectory = field(default_factory=lambda: Trajectory("", "", [], [], [], TaskStatus.PARTIAL, 0.0))
-    key_states: List[str] = field(default_factory=list)
-    critical_actions: List[str] = field(default_factory=list)
+    key_states: list[str] = field(default_factory=list)
+    critical_actions: list[str] = field(default_factory=list)
 
 
 @dataclass
 class ScriptMemory(ProceduralMemory):
     script: str = ""
-    steps: List[str] = field(default_factory=list)
-    preconditions: List[str] = field(default_factory=list)
-    postconditions: List[str] = field(default_factory=list)
-    expected_outcomes: Dict[str, Any] = field(default_factory=dict)
+    steps: list[str] = field(default_factory=list)
+    preconditions: list[str] = field(default_factory=list)
+    postconditions: list[str] = field(default_factory=list)
+    expected_outcomes: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class ProceduralizedMemory(ProceduralMemory):
-    trajectory: Optional[Trajectory] = None
+    trajectory: Trajectory | None = None
     script: str = ""
     abstraction_level: float = 0.0
-    key_patterns: List[str] = field(default_factory=list)
+    key_patterns: list[str] = field(default_factory=list)
 
 
 # ===== Embedding interfaces =====

@@ -1,17 +1,19 @@
 from .update import (
-    MempUpdatePipeline,
-    UpdateConfig,
-    UpdateStrategy,
-    UpdateResult,
     MemoryHealth,
+    MemppUpdatePipeline,
+    PineconeNamespaceMigrationExecutor,
     ReflectionEngine,
+    UpdateConfig,
+    UpdateResult,
+    UpdateStrategy,
 )
 
 __all__ = [
-    "MempUpdatePipeline",
+    "MemppUpdatePipeline",
     "UpdateConfig",
     "UpdateStrategy",
     "UpdateResult",
     "MemoryHealth",
     "ReflectionEngine",
+    "PineconeNamespaceMigrationExecutor",
 ]

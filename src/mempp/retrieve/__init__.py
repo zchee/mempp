@@ -1,13 +1,13 @@
 from .retrieve import (
-    MempRetrievalPipeline,
-    RetrievalResult,
+    MemppRetrievalPipeline,
     RetrievalConfig,
+    RetrievalResult,
     RetrievalStrategy,
     SimilarityCalculator,
 )
 
 __all__ = [
-    "MempRetrievalPipeline",
+    "MemppRetrievalPipeline",
     "RetrievalResult",
     "RetrievalConfig",
     "RetrievalStrategy",

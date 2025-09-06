@@ -5,27 +5,27 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-import numpy as np
 import anthropic
+import numpy as np
+from prometheus_client import Counter, Gauge, Histogram
 from sklearn.cluster import DBSCAN
-from prometheus_client import Counter, Histogram, Gauge
 
 # Import from previous components
 from mempp.build import (
-    ProceduralMemory,
-    TrajectoryMemory,
-    ScriptMemory,
-    ProceduralizedMemory,
-    PineconeMemoryStorage,
-    Trajectory,
-    TaskStatus,
-    MempBuildPipeline,
     EmbeddingModel,
+    MemppBuildPipeline,
+    PineconeMemoryStorage,
+    ProceduralizedMemory,
+    ProceduralMemory,
+    ScriptMemory,
+    TaskStatus,
+    Trajectory,
+    TrajectoryMemory,
 )
 from mempp.retrieve import (
-    MempRetrievalPipeline,
+    MemppRetrievalPipeline,
     RetrievalResult,
 )
 
@@ -78,8 +78,8 @@ class UpdateResult:
     success: bool
     timestamp: datetime
     namespace: str = "proceduralized"
-    changes: Dict[str, Any] = field(default_factory=dict)
-    metrics: Dict[str, float] = field(default_factory=dict)
+    changes: dict[str, Any] = field(default_factory=dict)
+    metrics: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -102,7 +102,7 @@ class MemoryHealth:
 class ReflectionEngine:
     """Engine for reflecting on and correcting failed experiences"""
 
-    def __init__(self, llm_client: Optional[Any] = None):
+    def __init__(self, llm_client: Any | None = None):
         self.llm_client = llm_client or anthropic.Anthropic()
         self.reflection_history = deque(maxlen=100)
 
@@ -111,7 +111,7 @@ class ReflectionEngine:
         original_memory: ProceduralMemory,
         failed_trajectory: Trajectory,
         retrieved_memory: RetrievalResult,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Reflect on why a memory led to failure"""
 
         reflection_prompt = f"""
@@ -137,12 +137,15 @@ class ReflectionEngine:
 
         try:
             response = self.llm_client.messages.create(
-                model="claude-3-5-sonnet-20241022",
+                model="claude-sonnet-4-20250514",
                 max_tokens=1000,
                 messages=[{"role": "user", "content": reflection_prompt}],
             )
 
-            reflection = self._parse_reflection(response.content[0].text)
+            # Collect text blocks only; ignore tool/thinking blocks
+            blocks = getattr(response, "content", [])
+            text = "\n".join([str(getattr(b, "text", "")) for b in blocks if getattr(b, "text", None)])
+            reflection = self._parse_reflection(text)
 
             # Store in history
             self.reflection_history.append({
@@ -159,7 +162,7 @@ class ReflectionEngine:
             logger.error(f"Reflection failed: {e}")
             return {"error": str(e), "recommendation": "keep", "corrections": []}
 
-    async def generate_correction(self, memory: ProceduralMemory, reflection: Dict[str, Any]) -> ProceduralMemory:
+    async def generate_correction(self, memory: ProceduralMemory, reflection: dict[str, Any]) -> ProceduralMemory:
         """Generate corrected version of memory based on reflection"""
 
         if isinstance(memory, ScriptMemory):
@@ -178,7 +181,7 @@ class ReflectionEngine:
 
         return corrected
 
-    async def _correct_script_memory(self, memory: ScriptMemory, reflection: Dict[str, Any]) -> ScriptMemory:
+    async def _correct_script_memory(self, memory: ScriptMemory, reflection: dict[str, Any]) -> ScriptMemory:
         """Correct a script-based memory"""
 
         correction_prompt = f"""
@@ -194,12 +197,13 @@ class ReflectionEngine:
         """
 
         response = self.llm_client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model="claude-sonnet-4-20250514",
             max_tokens=500,
             messages=[{"role": "user", "content": correction_prompt}],
         )
 
-        corrected_script = response.content[0].text
+        blocks = getattr(response, "content", [])
+        corrected_script = "\n".join([str(getattr(b, "text", "")) for b in blocks if getattr(b, "text", None)])
 
         # Create corrected memory
         corrected = ScriptMemory(
@@ -218,7 +222,7 @@ class ReflectionEngine:
         return corrected
 
     async def _correct_trajectory_memory(
-        self, memory: TrajectoryMemory, reflection: Dict[str, Any]
+        self, memory: TrajectoryMemory, reflection: dict[str, Any]
     ) -> TrajectoryMemory:
         """Correct a trajectory-based memory"""
 
@@ -240,7 +244,7 @@ class ReflectionEngine:
         return corrected
 
     async def _correct_proceduralized_memory(
-        self, memory: ProceduralizedMemory, reflection: Dict[str, Any]
+        self, memory: ProceduralizedMemory, reflection: dict[str, Any]
     ) -> ProceduralizedMemory:
         """Correct a combined memory"""
 
@@ -274,7 +278,7 @@ class ReflectionEngine:
 
         return corrected
 
-    def _parse_reflection(self, text: str) -> Dict[str, Any]:
+    def _parse_reflection(self, text: str) -> dict[str, Any]:
         """Parse reflection text into structured format"""
 
         reflection = {
@@ -321,7 +325,7 @@ class ReflectionEngine:
 
         return reflection
 
-    def _extract_steps_from_script(self, script: str) -> List[str]:
+    def _extract_steps_from_script(self, script: str) -> list[str]:
         """Extract steps from corrected script"""
         steps = []
         for line in script.split("\n"):
@@ -348,7 +352,7 @@ class PineconeMemoryConsolidator:
 
     async def find_similar_memories_in_namespace(
         self, namespace: str, sample_size: int = 100
-    ) -> List[List[ProceduralMemory]]:
+    ) -> list[list[ProceduralMemory]]:
         """Find groups of similar memories within a namespace"""
 
         # Sample memories from namespace
@@ -383,7 +387,7 @@ class PineconeMemoryConsolidator:
 
         return list(clusters.values())
 
-    async def consolidate_group(self, similar_memories: List[ProceduralMemory], namespace: str) -> ProceduralMemory:
+    async def consolidate_group(self, similar_memories: list[ProceduralMemory], namespace: str) -> ProceduralMemory:
         """Consolidate a group of similar memories into one"""
 
         if len(similar_memories) == 1:
@@ -400,13 +404,16 @@ class PineconeMemoryConsolidator:
             sum(m.success_rate * m.usage_count for m in similar_memories) / total_usage if total_usage > 0 else 0
         )
 
-        # Create consolidated memory
+        # Create consolidated memory (narrow the list type before passing)
         if isinstance(base_memory, ScriptMemory):
-            consolidated = await self._consolidate_scripts(similar_memories)
+            script_mems = [m for m in similar_memories if isinstance(m, ScriptMemory)]
+            consolidated = await self._consolidate_scripts(script_mems)
         elif isinstance(base_memory, TrajectoryMemory):
-            consolidated = await self._consolidate_trajectories(similar_memories)
+            traj_mems = [m for m in similar_memories if isinstance(m, TrajectoryMemory)]
+            consolidated = await self._consolidate_trajectories(traj_mems)
         elif isinstance(base_memory, ProceduralizedMemory):
-            consolidated = await self._consolidate_proceduralized(similar_memories)
+            proc_mems = [m for m in similar_memories if isinstance(m, ProceduralizedMemory)]
+            consolidated = await self._consolidate_proceduralized(proc_mems)
         else:
             consolidated = base_memory
 
@@ -420,7 +427,7 @@ class PineconeMemoryConsolidator:
 
         return consolidated
 
-    async def _consolidate_scripts(self, memories: List[ScriptMemory]) -> ScriptMemory:
+    async def _consolidate_scripts(self, memories: list[ScriptMemory]) -> ScriptMemory:
         """Consolidate script memories"""
 
         # Combine all steps and deduplicate
@@ -465,7 +472,7 @@ class PineconeMemoryConsolidator:
 
         return consolidated
 
-    async def _consolidate_trajectories(self, memories: List[TrajectoryMemory]) -> TrajectoryMemory:
+    async def _consolidate_trajectories(self, memories: list[TrajectoryMemory]) -> TrajectoryMemory:
         """Consolidate trajectory memories"""
 
         best_memory = max(memories, key=lambda m: (m.success_rate, m.usage_count))
@@ -508,7 +515,7 @@ class PineconeMemoryConsolidator:
 
         return consolidated
 
-    async def _consolidate_proceduralized(self, memories: List[ProceduralizedMemory]) -> ProceduralizedMemory:
+    async def _consolidate_proceduralized(self, memories: list[ProceduralizedMemory]) -> ProceduralizedMemory:
         """Consolidate proceduralized memories"""
 
         # Consolidate scripts
@@ -549,7 +556,7 @@ class PineconeMemoryConsolidator:
             task_pattern=best_memory.task_pattern,
             trajectory=best_memory.trajectory,
             script=consolidated_script.script,
-            abstraction_level=np.mean([m.abstraction_level for m in memories]),
+            abstraction_level=float(np.mean([m.abstraction_level for m in memories])),
             key_patterns=best_memory.key_patterns,
             embedding=avg_embedding,
             sparse_embedding=combined_sparse,
@@ -671,7 +678,7 @@ class PineconeMemoryHealthMonitor:
         else:
             return "keep"
 
-    async def analyze_namespace_health(self, namespace: str) -> Dict[str, Any]:
+    async def analyze_namespace_health(self, namespace: str) -> dict[str, Any]:
         """Analyze overall health of a namespace"""
 
         # Get namespace statistics from Pinecone
@@ -687,7 +694,7 @@ class PineconeMemoryHealthMonitor:
             "recommendation": self._get_namespace_recommendation(namespace_stats),
         }
 
-    def _get_namespace_recommendation(self, namespace_stats: Dict) -> str:
+    def _get_namespace_recommendation(self, namespace_stats: dict) -> str:
         """Get recommendation for namespace management"""
 
         vector_count = namespace_stats.get("vector_count", 0)
@@ -710,9 +717,9 @@ class PineconeUpdateExecutor(ABC):
     async def execute(
         self,
         storage: PineconeMemoryStorage,
-        memories_to_update: List[ProceduralMemory],
-        context: Dict[str, Any],
-    ) -> List[UpdateResult]:
+        memories_to_update: list[ProceduralMemory],
+        context: dict[str, Any],
+    ) -> list[UpdateResult]:
         """Execute update operation"""
         pass
 
@@ -723,9 +730,9 @@ class PineconeVanillaUpdateExecutor(PineconeUpdateExecutor):
     async def execute(
         self,
         storage: PineconeMemoryStorage,
-        memories_to_update: List[ProceduralMemory],
-        context: Dict[str, Any],
-    ) -> List[UpdateResult]:
+        memories_to_update: list[ProceduralMemory],
+        context: dict[str, Any],
+    ) -> list[UpdateResult]:
         """Add all memories without filtering"""
 
         results = []
@@ -777,15 +784,15 @@ class PineconeValidationUpdateExecutor(PineconeUpdateExecutor):
     async def execute(
         self,
         storage: PineconeMemoryStorage,
-        memories_to_update: List[ProceduralMemory],
-        context: Dict[str, Any],
-    ) -> List[UpdateResult]:
+        memories_to_update: list[ProceduralMemory],
+        context: dict[str, Any],
+    ) -> list[UpdateResult]:
         """Add only memories from successful trajectories"""
 
         results = []
         trajectories = context.get("trajectories", [])
 
-        for memory, trajectory in zip(memories_to_update, trajectories):
+        for memory, trajectory in zip(memories_to_update, trajectories, strict=False):
             if trajectory.status == TaskStatus.SUCCESS and trajectory.final_reward >= self.success_threshold:
                 try:
                     # Determine namespace
@@ -847,9 +854,9 @@ class PineconeNamespaceMigrationExecutor(PineconeUpdateExecutor):
     async def execute(
         self,
         storage: PineconeMemoryStorage,
-        memories_to_update: List[ProceduralMemory],
-        context: Dict[str, Any],
-    ) -> List[UpdateResult]:
+        memories_to_update: list[ProceduralMemory],
+        context: dict[str, Any],
+    ) -> list[UpdateResult]:
         """Migrate memories between namespaces based on performance"""
 
         results = []
@@ -908,9 +915,9 @@ class PineconeConsolidationUpdateExecutor(PineconeUpdateExecutor):
     async def execute(
         self,
         storage: PineconeMemoryStorage,
-        memories_to_update: List[ProceduralMemory],
-        context: Dict[str, Any],
-    ) -> List[UpdateResult]:
+        memories_to_update: list[ProceduralMemory],
+        context: dict[str, Any],
+    ) -> list[UpdateResult]:
         """Find and consolidate similar memories within namespaces"""
 
         results = []
@@ -973,9 +980,9 @@ class PineconePruningUpdateExecutor(PineconeUpdateExecutor):
     async def execute(
         self,
         storage: PineconeMemoryStorage,
-        memories_to_update: List[ProceduralMemory],
-        context: Dict[str, Any],
-    ) -> List[UpdateResult]:
+        memories_to_update: list[ProceduralMemory],
+        context: dict[str, Any],
+    ) -> list[UpdateResult]:
         """Remove unhealthy memories from each namespace"""
 
         results = []
@@ -1025,27 +1032,35 @@ class PineconePruningUpdateExecutor(PineconeUpdateExecutor):
 # ============= Main Update Pipeline =============
 
 
-class MempUpdatePipeline:
+class MemppUpdatePipeline:
     """Main pipeline for updating procedural memories in Pinecone"""
 
     def __init__(
         self,
         storage: PineconeMemoryStorage,
-        build_pipeline: MempBuildPipeline,
-        retrieval_pipeline: MempRetrievalPipeline,
-        config: Optional[UpdateConfig] = None,
-        llm_client: Optional[Any] = None,
-        embedder: Optional[EmbeddingModel] = None,
+        build_pipeline: MemppBuildPipeline,
+        retrieval_pipeline: MemppRetrievalPipeline,
+        config: UpdateConfig | None = None,
+        llm_client: Any | None = None,
+        embedder: EmbeddingModel | None = None,
     ):
         self.storage = storage
         self.build_pipeline = build_pipeline
         self.retrieval_pipeline = retrieval_pipeline
         self.config = config or UpdateConfig()
-        self.embedder = embedder or build_pipeline.embedder
+        # Ensure embedder is always concrete for type checkers (local var)
+        if embedder is None:
+            embedder_final: EmbeddingModel = build_pipeline.embedder
+        else:
+            from typing import cast as _cast
+
+            embedder_final = _cast(EmbeddingModel, embedder)
 
         # Initialize components
         self.reflection_engine = ReflectionEngine(llm_client)
-        self.consolidator = PineconeMemoryConsolidator(self.storage, self.embedder, self.config.consolidation_threshold)
+        self.consolidator = PineconeMemoryConsolidator(
+            self.storage, embedder_final, self.config.consolidation_threshold
+        )
         self.health_monitor = PineconeMemoryHealthMonitor(self.storage, self.config)
 
         # Initialize executors
@@ -1091,9 +1106,9 @@ class MempUpdatePipeline:
     async def update_after_task(
         self,
         trajectory: Trajectory,
-        retrieval_result: Optional[RetrievalResult] = None,
+        retrieval_result: RetrievalResult | None = None,
         strategy: UpdateStrategy = UpdateStrategy.VALIDATION,
-    ) -> List[UpdateResult]:
+    ) -> list[UpdateResult]:
         """Update memory after completing a task"""
 
         self.task_counter += 1
@@ -1115,7 +1130,7 @@ class MempUpdatePipeline:
 
         return []
 
-    async def batch_update(self, strategy: UpdateStrategy = UpdateStrategy.VALIDATION) -> List[UpdateResult]:
+    async def batch_update(self, strategy: UpdateStrategy = UpdateStrategy.VALIDATION) -> list[UpdateResult]:
         """Perform batch update of memories"""
 
         if not self.pending_updates:
@@ -1197,7 +1212,7 @@ class MempUpdatePipeline:
         logger.info(f"Batch update completed: {len(all_results)} operations")
         return all_results
 
-    async def _perform_namespace_migration(self) -> List[UpdateResult]:
+    async def _perform_namespace_migration(self) -> list[UpdateResult]:
         """Perform intelligent namespace migration"""
 
         migrations = []
@@ -1262,7 +1277,7 @@ class MempUpdatePipeline:
                 logger.error(f"Error in continuous learning cycle: {e}")
                 await asyncio.sleep(60)
 
-    def get_update_statistics(self) -> Dict[str, Any]:
+    def get_update_statistics(self) -> dict[str, Any]:
         """Get update pipeline statistics"""
 
         # Calculate update frequency
@@ -1318,8 +1333,8 @@ async def example_usage():
     pinecone_api_key = os.getenv("PINECONE_API_KEY", "your-api-key")
     storage = PineconeMemoryStorage(api_key=pinecone_api_key)
 
-    build_pipeline = MempBuildPipeline(pinecone_api_key=pinecone_api_key, storage=storage)
-    retrieval_pipeline = MempRetrievalPipeline(storage=storage)
+    build_pipeline = MemppBuildPipeline(pinecone_api_key=pinecone_api_key, storage=storage)
+    retrieval_pipeline = MemppRetrievalPipeline(storage=storage)
 
     # Initialize update pipeline
     update_config = UpdateConfig(
@@ -1332,7 +1347,7 @@ async def example_usage():
         auto_index_optimization=True,
     )
 
-    update_pipeline = MempUpdatePipeline(
+    update_pipeline = MemppUpdatePipeline(
         storage=storage,
         build_pipeline=build_pipeline,
         retrieval_pipeline=retrieval_pipeline,
@@ -1346,12 +1361,8 @@ async def example_usage():
     print("=== Simulating Task Completions with Pinecone ===\n")
 
     from mempp.build import (
-        Trajectory,
         TaskStatus,
-        State,
-        Action,
-        Observation,
-        ActionType,
+        Trajectory,
     )
 
     sample_trajectories = [
@@ -1431,7 +1442,7 @@ async def example_usage():
     stats = update_pipeline.get_update_statistics()
     print(f"Total Tasks: {stats['task_counter']}")
     print(f"Pending Updates: {stats['pending_updates']}")
-    print(f"Pinecone Statistics:")
+    print("Pinecone Statistics:")
     print(f"  Total Vectors: {stats['pinecone_stats']['total_vectors']}")
     print(f"  Namespaces: {list(stats['pinecone_stats'].get('namespaces', {}).keys())}")
 

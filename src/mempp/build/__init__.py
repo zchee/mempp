@@ -1,19 +1,19 @@
+from .pipeline import MemppBuildPipeline
+from .storage import PineconeMemoryStorage
 from .types import (
-    TaskStatus,
-    ActionType,
-    State,
     Action,
-    Observation,
-    Trajectory,
-    ProceduralMemory,
-    TrajectoryMemory,
-    ScriptMemory,
-    ProceduralizedMemory,
+    ActionType,
     EmbeddingModel,
     MultilingualE5Embedder,
+    Observation,
+    ProceduralizedMemory,
+    ProceduralMemory,
+    ScriptMemory,
+    State,
+    TaskStatus,
+    Trajectory,
+    TrajectoryMemory,
 )
-from .storage import PineconeMemoryStorage
-from .pipeline import MempBuildPipeline
 
 __all__ = [
     "TaskStatus",
@@ -29,5 +29,5 @@ __all__ = [
     "EmbeddingModel",
     "MultilingualE5Embedder",
     "PineconeMemoryStorage",
-    "MempBuildPipeline",
+    "MemppBuildPipeline",
 ]
