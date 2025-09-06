@@ -1345,7 +1345,7 @@ async def example_usage():
     # Simulate task completions
     print("=== Simulating Task Completions with Pinecone ===\n")
 
-    from memp_build import (
+    from mempp.build import (
         Trajectory,
         TaskStatus,
         State,
@@ -1403,7 +1403,7 @@ async def example_usage():
         if trajectory.status != TaskStatus.SUCCESS and len(storage.memories) > 0:
             memories = list(storage.memories.values())
             if memories:
-                from memp_retrieve import RetrievalResult
+                from mempp.retrieve import RetrievalResult
 
                 retrieval_result = RetrievalResult(
                     memory=memories[0],

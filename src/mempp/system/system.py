@@ -753,7 +753,7 @@ class MempSystem:
 
         # Execute migrations
         if migrations:
-            from memp_update import PineconeNamespaceMigrationExecutor
+            from mempp.update import PineconeNamespaceMigrationExecutor
 
             executor = PineconeNamespaceMigrationExecutor()
             results = await executor.execute(self.storage, [], {"migrations": migrations})
