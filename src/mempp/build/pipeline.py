@@ -4,8 +4,6 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 
-import numpy as np
-
 from .storage import PineconeMemoryStorage
 from .types import (
     EmbeddingModel,
