@@ -11,7 +11,34 @@ authors = [
     { name = "Koichi Shiraishi", email = "zchee.io@gmail.com" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "aiofiles>=24.1.0",
+    "aiokafka>=0.12.0",
+    "anthropic>=0.66.0",
+    "cachetools>=5.5.2",
+    "google-genai>=1.33.0",
+    "keybert>=0.9.0",
+    "numpy>=2.3.2",
+    "openai>=1.106.1",
+    "pandas>=2.3.2",
+    "pinecone>=7.3.0",
+    "pinecone-text>=0.11.0",
+    "prometheus-client>=0.22.1",
+    "psutil>=7.0.0",
+    "pydantic>=2.11.7",
+    "ray>=2.49.1",
+    "redis>=6.4.0",
+    "scikit-learn>=1.7.1",
+    "scipy>=1.16.1",
+    "sentence-transformers>=5.1.0",
+    "spacy>=3.8.7",
+    "structlog>=25.4.0",
+    "tenacity>=9.1.2",
+    "torch>=2.8.0",
+    "transformers>=4.56.1",
+    "wandb>=0.21.3",
+    "yake>=0.6.0",
+]
 
 [project.scripts]
 mempp = "mempp:main"
