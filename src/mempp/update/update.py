@@ -102,9 +102,9 @@ class MemoryHealth:
 class ReflectionEngine:
     """Engine for reflecting on and correcting failed experiences"""
 
-    def __init__(self, llm_client: Any | None = None):
+    def __init__(self, llm_client: Any | None = None) -> None:
         self.llm_client = llm_client or anthropic.Anthropic()
-        self.reflection_history = deque(maxlen=100)
+        self.reflection_history: deque[dict[str, Any]] = deque(maxlen=100)
 
     async def reflect_on_failure(
         self,
@@ -165,6 +165,7 @@ class ReflectionEngine:
     async def generate_correction(self, memory: ProceduralMemory, reflection: dict[str, Any]) -> ProceduralMemory:
         """Generate corrected version of memory based on reflection"""
 
+        corrected: ProceduralMemory
         if isinstance(memory, ScriptMemory):
             corrected = await self._correct_script_memory(memory, reflection)
         elif isinstance(memory, TrajectoryMemory):
@@ -281,7 +282,7 @@ class ReflectionEngine:
     def _parse_reflection(self, text: str) -> dict[str, Any]:
         """Parse reflection text into structured format"""
 
-        reflection = {
+        reflection: dict[str, Any] = {
             "issues": [],
             "corrections": [],
             "warnings": [],
@@ -291,7 +292,7 @@ class ReflectionEngine:
         }
 
         lines = text.strip().split("\n")
-        current_section = None
+        current_section: str | None = None
 
         for line in lines:
             line = line.strip()
@@ -321,7 +322,8 @@ class ReflectionEngine:
                 elif "adjust" in line.lower():
                     reflection["recommendation"] = "adjust"
             elif current_section and line:
-                reflection[current_section].append(line)
+                if isinstance(reflection[current_section], list):
+                    reflection[current_section].append(line)
 
         return reflection
 
@@ -345,7 +347,7 @@ class PineconeMemoryConsolidator:
         storage: PineconeMemoryStorage,
         embedder: EmbeddingModel,
         similarity_threshold: float = 0.9,
-    ):
+    ) -> None:
         self.storage = storage
         self.embedder = embedder
         self.similarity_threshold = similarity_threshold
@@ -374,10 +376,10 @@ class PineconeMemoryConsolidator:
         if len(memories) < 2:
             return []
 
-        embeddings = np.array(embeddings)
+        embeddings_array = np.array(embeddings)
 
         # Use DBSCAN for clustering
-        clustering = DBSCAN(eps=1 - self.similarity_threshold, min_samples=2, metric="cosine").fit(embeddings)
+        clustering = DBSCAN(eps=1 - self.similarity_threshold, min_samples=2, metric="cosine").fit(embeddings_array)
 
         # Group memories by cluster
         clusters = defaultdict(list)
@@ -405,6 +407,7 @@ class PineconeMemoryConsolidator:
         )
 
         # Create consolidated memory (narrow the list type before passing)
+        consolidated: ProceduralMemory
         if isinstance(base_memory, ScriptMemory):
             script_mems = [m for m in similar_memories if isinstance(m, ScriptMemory)]
             consolidated = await self._consolidate_scripts(script_mems)
@@ -449,7 +452,7 @@ class PineconeMemoryConsolidator:
         avg_embedding = np.mean([m.embedding for m in memories], axis=0)
 
         # Combine sparse embeddings
-        combined_sparse = {}
+        combined_sparse: dict[str, float] = {}
         for memory in memories:
             if memory.sparse_embedding:
                 for key, value in memory.sparse_embedding.items():
@@ -485,7 +488,11 @@ class PineconeMemoryConsolidator:
         seen_actions = set()
         unique_actions = []
         for action in all_critical_actions:
-            action_str = f"{action.type}_{action.content}"
+            if isinstance(action, str):
+                action_str = action
+            else:
+                # Handle Action object
+                action_str = f"{getattr(action, 'action_type', 'unknown')}_{getattr(action, 'content', 'unknown')}"
             if action_str not in seen_actions:
                 seen_actions.add(action_str)
                 unique_actions.append(action)
@@ -494,7 +501,7 @@ class PineconeMemoryConsolidator:
         avg_embedding = np.mean([m.embedding for m in memories], axis=0)
 
         # Combine sparse embeddings
-        combined_sparse = {}
+        combined_sparse: dict[str, float] = {}
         for memory in memories:
             if memory.sparse_embedding:
                 for key, value in memory.sparse_embedding.items():
@@ -542,7 +549,7 @@ class PineconeMemoryConsolidator:
         avg_embedding = np.mean([m.embedding for m in memories], axis=0)
 
         # Combine sparse embeddings
-        combined_sparse = {}
+        combined_sparse: dict[str, float] = {}
         for memory in memories:
             if memory.sparse_embedding:
                 for key, value in memory.sparse_embedding.items():
@@ -571,10 +578,10 @@ class PineconeMemoryConsolidator:
 class PineconeMemoryHealthMonitor:
     """Monitors and evaluates memory health in Pinecone"""
 
-    def __init__(self, storage: PineconeMemoryStorage, config: UpdateConfig):
+    def __init__(self, storage: PineconeMemoryStorage, config: UpdateConfig) -> None:
         self.storage = storage
         self.config = config
-        self.health_history = defaultdict(list)
+        self.health_history: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
 
         if config.enable_metrics:
             # Prometheus metrics
@@ -694,7 +701,7 @@ class PineconeMemoryHealthMonitor:
             "recommendation": self._get_namespace_recommendation(namespace_stats),
         }
 
-    def _get_namespace_recommendation(self, namespace_stats: dict) -> str:
+    def _get_namespace_recommendation(self, namespace_stats: dict[str, Any]) -> str:
         """Get recommendation for namespace management"""
 
         vector_count = namespace_stats.get("vector_count", 0)
@@ -778,7 +785,7 @@ class PineconeVanillaUpdateExecutor(PineconeUpdateExecutor):
 class PineconeValidationUpdateExecutor(PineconeUpdateExecutor):
     """Add only successful memories to Pinecone"""
 
-    def __init__(self, success_threshold: float = 0.0):
+    def __init__(self, success_threshold: float = 0.0) -> None:
         self.success_threshold = success_threshold
 
     async def execute(
@@ -909,7 +916,7 @@ class PineconeNamespaceMigrationExecutor(PineconeUpdateExecutor):
 class PineconeConsolidationUpdateExecutor(PineconeUpdateExecutor):
     """Consolidate similar memories in Pinecone"""
 
-    def __init__(self, consolidator: PineconeMemoryConsolidator):
+    def __init__(self, consolidator: PineconeMemoryConsolidator) -> None:
         self.consolidator = consolidator
 
     async def execute(
@@ -974,7 +981,7 @@ class PineconeConsolidationUpdateExecutor(PineconeUpdateExecutor):
 class PineconePruningUpdateExecutor(PineconeUpdateExecutor):
     """Prune low-value memories from Pinecone"""
 
-    def __init__(self, health_monitor: PineconeMemoryHealthMonitor):
+    def __init__(self, health_monitor: PineconeMemoryHealthMonitor) -> None:
         self.health_monitor = health_monitor
 
     async def execute(
@@ -1043,7 +1050,7 @@ class MemppUpdatePipeline:
         config: UpdateConfig | None = None,
         llm_client: Any | None = None,
         embedder: EmbeddingModel | None = None,
-    ):
+    ) -> None:
         self.storage = storage
         self.build_pipeline = build_pipeline
         self.retrieval_pipeline = retrieval_pipeline
@@ -1052,9 +1059,7 @@ class MemppUpdatePipeline:
         if embedder is None:
             embedder_final: EmbeddingModel = build_pipeline.embedder
         else:
-            from typing import cast as _cast
-
-            embedder_final = _cast(EmbeddingModel, embedder)
+            embedder_final = embedder
 
         # Initialize components
         self.reflection_engine = ReflectionEngine(llm_client)
@@ -1067,9 +1072,9 @@ class MemppUpdatePipeline:
         self._init_executors()
 
         # Update tracking
-        self.update_history = deque(maxlen=1000)
+        self.update_history: deque[dict[str, Any]] = deque(maxlen=1000)
         self.task_counter = 0
-        self.pending_updates = []
+        self.pending_updates: list[dict[str, Any]] = []
 
         # Continuous learning state
         self.learning_enabled = self.config.continuous_learning
@@ -1079,7 +1084,7 @@ class MemppUpdatePipeline:
         if self.config.enable_metrics:
             self._init_metrics()
 
-    def _init_executors(self):
+    def _init_executors(self) -> None:
         """Initialize Pinecone update executors"""
         self.executors = {
             UpdateStrategy.VANILLA: PineconeVanillaUpdateExecutor(),
@@ -1089,7 +1094,7 @@ class MemppUpdatePipeline:
             UpdateStrategy.PRUNING: PineconePruningUpdateExecutor(self.health_monitor),
         }
 
-    def _init_metrics(self):
+    def _init_metrics(self) -> None:
         """Initialize metrics tracking"""
         self.update_counter = Counter(
             "memory_updates_total",
@@ -1241,7 +1246,7 @@ class MemppUpdatePipeline:
 
         return []
 
-    async def continuous_learning_cycle(self):
+    async def continuous_learning_cycle(self) -> None:
         """Run continuous learning cycle with Pinecone optimization"""
 
         while self.learning_enabled:
@@ -1291,7 +1296,7 @@ class MemppUpdatePipeline:
             avg_interval = 0
 
         # Strategy usage
-        strategy_usage = defaultdict(int)
+        strategy_usage: defaultdict[str, int] = defaultdict(int)
         for update in self.update_history:
             strategy_usage[update["strategy"]] += 1
 
@@ -1309,13 +1314,13 @@ class MemppUpdatePipeline:
             "continuous_learning_enabled": self.learning_enabled,
         }
 
-    def enable_continuous_learning(self):
+    def enable_continuous_learning(self) -> None:
         """Enable continuous learning"""
         self.learning_enabled = True
         asyncio.create_task(self.continuous_learning_cycle())
         logger.info("Continuous learning enabled")
 
-    def disable_continuous_learning(self):
+    def disable_continuous_learning(self) -> None:
         """Disable continuous learning"""
         self.learning_enabled = False
         logger.info("Continuous learning disabled")
@@ -1324,7 +1329,7 @@ class MemppUpdatePipeline:
 # ============= Example Usage =============
 
 
-async def example_usage():
+async def example_usage() -> None:
     """Example of how to use the Memp Update pipeline with Pinecone"""
 
     import os

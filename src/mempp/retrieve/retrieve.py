@@ -79,7 +79,7 @@ class RetrievalResult:
     namespace: str = "proceduralized"
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def __lt__(self, other):
+    def __lt__(self, other: "RetrievalResult") -> bool:
         return self.score > other.score  # Higher score is better
 
 
@@ -104,9 +104,7 @@ class QueryKeyExtractor(KeyExtractor):
 
 
 class KeywordExtractor(KeyExtractor):
-    """Extracts keywords using multiple methods"""
-
-    def __init__(self):
+    def __init__(self) -> None:
         # Initialize KeyBERT for keyword extraction
         self.keybert = KeyBERT("paraphrase-MiniLM-L6-v2")
 
@@ -157,7 +155,7 @@ class KeywordExtractor(KeyExtractor):
 class AveFactExtractor(KeyExtractor):
     """Extracts facts and averages their importance"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.keyword_extractor = KeywordExtractor()
         # Initialize fact extraction pipeline
         self.fact_extractor = pipeline(
@@ -182,7 +180,7 @@ class AveFactExtractor(KeyExtractor):
         all_terms = keywords + facts
 
         # Count frequency as importance
-        term_importance = defaultdict(float)
+        term_importance: defaultdict[str, float] = defaultdict(float)
         for term in all_terms:
             term_importance[term.lower()] += 1.0
 
@@ -197,7 +195,7 @@ class AveFactExtractor(KeyExtractor):
 class SimilarityCalculator:
     """Calculates similarity between queries and memories"""
 
-    def __init__(self, embedder: EmbeddingModel, sparse_encoder: BM25Encoder | None = None):
+    def __init__(self, embedder: EmbeddingModel, sparse_encoder: BM25Encoder | None = None) -> None:
         self.embedder = embedder
         self.sparse_encoder = sparse_encoder
         # Initialize cross-encoder for reranking
@@ -244,7 +242,7 @@ class SimilarityCalculator:
 class RetrievalCache:
     """Caching layer for retrieval results"""
 
-    def __init__(self, redis_url: str | None = None, ttl: int = 3600):
+    def __init__(self, redis_url: str | None = None, ttl: int = 3600) -> None:
         self.ttl = ttl
 
         # Try to connect to Redis if available
@@ -258,7 +256,7 @@ class RetrievalCache:
                 logger.warning("Redis not available, using in-memory cache")
 
         # Fallback to in-memory cache
-        self.memory_cache = TTLCache(maxsize=1000, ttl=ttl)
+        self.memory_cache: TTLCache[str, list[RetrievalResult]] = TTLCache(maxsize=1000, ttl=ttl)
 
     def _get_cache_key(self, query: str, strategy: str, top_k: int, namespace: str = "") -> str:
         """Generate cache key"""
@@ -290,7 +288,7 @@ class RetrievalCache:
         top_k: int,
         results: list[RetrievalResult],
         namespace: str = "",
-    ):
+    ) -> None:
         """Cache results"""
         key = self._get_cache_key(query, strategy, top_k, namespace)
 
@@ -311,7 +309,7 @@ class RetrievalCache:
 class GeminiSearchIntegration:
     """Integration with Gemini for Google Search"""
 
-    def __init__(self, api_key: str | None = None):
+    def __init__(self, api_key: str | None = None) -> None:
         # The google-genai library API differs from google-generativeai.
         # Use typing casts to avoid strict attribute checks.
         from typing import Any, cast as _cast
@@ -361,10 +359,10 @@ class GeminiSearchIntegration:
 
     def _parse_search_results(self, text: str) -> list[dict[str, Any]]:
         """Parse search results into structured format"""
-        patterns = []
+        patterns: list[dict[str, Any]] = []
 
         lines = text.strip().split("\n")
-        current_pattern = {}
+        current_pattern: dict[str, Any] = {}
 
         for line in lines:
             if line.startswith("Task:") or line.startswith("Pattern:"):
@@ -387,7 +385,7 @@ class GeminiSearchIntegration:
 class PineconeRetriever(ABC):
     """Abstract base for Pinecone-based retrievers"""
 
-    def __init__(self, storage: PineconeMemoryStorage, config: RetrievalConfig):
+    def __init__(self, storage: PineconeMemoryStorage, config: RetrievalConfig) -> None:
         self.storage = storage
         self.config = config
 
@@ -397,7 +395,7 @@ class PineconeRetriever(ABC):
         pass
 
     def _convert_matches_to_results(
-        self, matches: list, strategy: str, retrieval_time: float, namespace: str
+        self, matches: list[dict[str, Any]], strategy: str, retrieval_time: float, namespace: str
     ) -> list[RetrievalResult]:
         """Convert Pinecone matches to RetrievalResult objects"""
         results = []
@@ -430,7 +428,7 @@ class QueryBasedPineconeRetriever(PineconeRetriever):
         config: RetrievalConfig,
         embedder: EmbeddingModel,
         similarity_calc: SimilarityCalculator,
-    ):
+    ) -> None:
         super().__init__(storage, config)
         self.embedder = embedder
         self.similarity_calc = similarity_calc
@@ -481,7 +479,7 @@ class HybridPineconeRetriever(PineconeRetriever):
         config: RetrievalConfig,
         embedder: EmbeddingModel,
         similarity_calc: SimilarityCalculator,
-    ):
+    ) -> None:
         super().__init__(storage, config)
         self.embedder = embedder
         self.similarity_calc = similarity_calc
@@ -542,7 +540,7 @@ class NamespaceAwareRetriever(PineconeRetriever):
         config: RetrievalConfig,
         embedder: EmbeddingModel,
         similarity_calc: SimilarityCalculator,
-    ):
+    ) -> None:
         super().__init__(storage, config)
         self.embedder = embedder
         self.similarity_calc = similarity_calc
@@ -601,7 +599,7 @@ class CascadingPineconeRetriever(PineconeRetriever):
         config: RetrievalConfig,
         embedder: EmbeddingModel,
         similarity_calc: SimilarityCalculator,
-    ):
+    ) -> None:
         super().__init__(storage, config)
         self.embedder = embedder
         self.similarity_calc = similarity_calc
@@ -679,7 +677,7 @@ class MemppRetrievalPipeline:
         embedder: EmbeddingModel | None = None,
         cache_redis_url: str | None = None,
         gemini_api_key: str | None = None,
-    ):
+    ) -> None:
         self.storage = storage
         self.config = config or RetrievalConfig()
         self.embedder = embedder or MultilingualE5Embedder()
@@ -694,16 +692,16 @@ class MemppRetrievalPipeline:
         self._init_retrievers()
 
         # Statistics
-        self.retrieval_stats = {
+        self.retrieval_stats: dict[str, Any] = {
             "total_queries": 0,
             "cache_hits": 0,
             "cache_misses": 0,
-            "average_retrieval_time": 0,
+            "average_retrieval_time": 0.0,
             "strategy_usage": defaultdict(int),
             "namespace_usage": defaultdict(int),
         }
 
-    def _init_retrievers(self):
+    def _init_retrievers(self) -> None:
         """Initialize Pinecone-based retrieval strategies"""
         self.retrievers = {
             RetrievalStrategy.QUERY_BASED: QueryBasedPineconeRetriever(
@@ -787,7 +785,7 @@ class MemppRetrievalPipeline:
         # Update statistics
         if results:
             avg_time = np.mean([r.retrieval_time for r in results])
-            self.retrieval_stats["average_retrieval_time"] = (
+            self.retrieval_stats["average_retrieval_time"] = float(
                 self.retrieval_stats["average_retrieval_time"] * (self.retrieval_stats["total_queries"] - 1) + avg_time
             ) / self.retrieval_stats["total_queries"]
 
@@ -838,7 +836,7 @@ class MemppRetrievalPipeline:
 
         return results
 
-    def update_memory_usage(self, memory_id: str, success: bool, namespace: str = "proceduralized"):
+    def update_memory_usage(self, memory_id: str, success: bool, namespace: str = "proceduralized") -> None:
         """Update memory usage statistics in Pinecone"""
         if memory_id in self.storage.memories:
             memory = self.storage.memories[memory_id]
@@ -880,7 +878,7 @@ class MemppRetrievalPipeline:
     ) -> dict[str, Any]:
         """Optimize retrieval strategy based on test queries"""
 
-        strategy_performance = {}
+        strategy_performance: dict[str, dict[str, Any]] = {}
 
         for strategy in [
             RetrievalStrategy.QUERY_BASED,
@@ -923,7 +921,7 @@ class MemppRetrievalPipeline:
 # ============= Example Usage =============
 
 
-async def example_usage():
+async def example_usage() -> None:
     """Example of how to use the Memp Retrieval pipeline with Pinecone"""
 
     import os

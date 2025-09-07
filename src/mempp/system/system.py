@@ -88,7 +88,7 @@ class TaskRequest:
     preferred_namespace: str | None = None  # Pinecone namespace preference
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.task_id:
             self.task_id = str(uuid.uuid4())
 
@@ -173,7 +173,7 @@ class MemppSystemConfig:
             config_dict = yaml.safe_load(f)
         return cls(**config_dict)
 
-    def to_yaml(self, path: Path):
+    def to_yaml(self, path: Path) -> None:
         """Save configuration to YAML file"""
         config_dict = self.__dict__.copy()
         with open(path, "w") as f:
@@ -220,13 +220,13 @@ class SystemEvent:
 class EventBus:
     """Event bus for system-wide communication"""
 
-    def __init__(self, kafka_brokers: list[str] | None = None):
-        self.listeners = defaultdict(list)
+    def __init__(self, kafka_brokers: list[str] | None = None) -> None:
+        self.listeners: defaultdict[EventType, list[Callable[[SystemEvent], Any]]] = defaultdict(list)
         self.kafka_brokers = kafka_brokers
         self.producer: AIOKafkaProducer | None = None
         self.consumer: AIOKafkaConsumer | None = None
 
-    async def initialize(self):
+    async def initialize(self) -> None:
         """Initialize event bus"""
         if self.kafka_brokers:
             try:
@@ -238,7 +238,7 @@ class EventBus:
             except Exception as e:
                 logger.warning(f"Failed to initialize Kafka: {e}")
 
-    async def publish(self, event: SystemEvent):
+    async def publish(self, event: SystemEvent) -> None:
         """Publish an event"""
         # Local listeners
         for listener in self.listeners[event.event_type]:
@@ -254,11 +254,11 @@ class EventBus:
             except Exception as e:
                 logger.error(f"Kafka publish error: {e}")
 
-    def subscribe(self, event_type: EventType, listener: Callable):
+    def subscribe(self, event_type: EventType, listener: Callable[[SystemEvent], Any]) -> None:
         """Subscribe to events"""
         self.listeners[event_type].append(listener)
 
-    async def close(self):
+    async def close(self) -> None:
         """Close event bus"""
         if self.producer:
             await self.producer.stop()
@@ -272,7 +272,7 @@ class EventBus:
 class SimulatedTaskExecutor(TaskExecutor):
     """Simulated task executor for testing"""
 
-    def __init__(self, success_rate: float = 0.8):
+    def __init__(self, success_rate: float = 0.8) -> None:
         self.success_rate = success_rate
 
     async def execute(self, task_description: str, memory_context: list[RetrievalResult] | None = None) -> Trajectory:
@@ -322,7 +322,7 @@ class SimulatedTaskExecutor(TaskExecutor):
 class LLMTaskExecutor(TaskExecutor):
     """LLM-based task executor"""
 
-    def __init__(self, llm_client: Any | None = None):
+    def __init__(self, llm_client: Any | None = None) -> None:
         self.llm_client = llm_client or anthropic.Anthropic()
 
     async def execute(self, task_description: str, memory_context: list[RetrievalResult] | None = None) -> Trajectory:
@@ -346,10 +346,11 @@ class LLMTaskExecutor(TaskExecutor):
         """
 
         response = await asyncio.to_thread(
-            self.llm_client.messages.create,
-            model="claude-sonnet-4-20250514",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}],
+            lambda: self.llm_client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=1000,
+                messages=[{"role": "user", "content": prompt}],
+            )
         )
 
         blocks = getattr(response, "content", [])
@@ -389,7 +390,7 @@ class LLMTaskExecutor(TaskExecutor):
 class MemppSystem:
     """Core system integrating all Mempp components with Pinecone"""
 
-    def __init__(self, config: MemppSystemConfig, task_executor: TaskExecutor | None = None):
+    def __init__(self, config: MemppSystemConfig, task_executor: TaskExecutor | None = None) -> None:
         self.config = config
         self.task_executor = task_executor or SimulatedTaskExecutor()
 
@@ -414,9 +415,9 @@ class MemppSystem:
         self.event_bus = EventBus(self.config.kafka_brokers)
 
         # Task management
-        self.task_queue = asyncio.Queue(maxsize=1000)
+        self.task_queue: asyncio.Queue[TaskRequest] = asyncio.Queue(maxsize=1000)
         self.active_tasks: dict[str, asyncio.Task[TaskResponse]] = {}
-        self.task_history = deque(maxlen=10000)
+        self.task_history: deque[TaskResponse] = deque(maxlen=10000)
 
         # Metrics
         if self.config.enable_metrics:
@@ -424,7 +425,7 @@ class MemppSystem:
 
         # State
         self.is_running = False
-        self.workers = []
+        self.workers: list[asyncio.Task[None]] = []
 
         # Statistics
         self.stats: dict[str, Any] = {
@@ -443,7 +444,7 @@ class MemppSystem:
             environment=config.pinecone_environment,
         )
 
-    def _init_pipelines(self):
+    def _init_pipelines(self) -> None:
         """Initialize component pipelines with Pinecone"""
 
         # Build pipeline
@@ -496,7 +497,7 @@ class MemppSystem:
             embedder=self.embedder,
         )
 
-    def _init_metrics(self):
+    def _init_metrics(self) -> None:
         """Initialize Prometheus metrics"""
         self.task_counter = Counter("memp_tasks_total", "Total number of tasks processed", ["status", "namespace"])
         self.memory_counter = Gauge("memp_memories_total", "Total number of stored memories")
@@ -504,7 +505,7 @@ class MemppSystem:
         self.execution_time = Histogram("memp_task_execution_seconds", "Task execution time in seconds")
         self.retrieval_score = Summary("memp_retrieval_score", "Memory retrieval relevance scores")
 
-    async def initialize(self):
+    async def initialize(self) -> None:
         """Initialize the system"""
         await self.event_bus.initialize()
 
@@ -521,7 +522,7 @@ class MemppSystem:
 
         logger.info("MempSystem initialized successfully")
 
-    async def _init_distributed(self):
+    async def _init_distributed(self) -> None:
         """Initialize distributed components"""
         if not ray.is_initialized():
             ray.init(address="auto", ignore_reinit_error=True)
@@ -682,7 +683,7 @@ class MemppSystem:
                 metadata={"error": str(e)},
             )
 
-    def _update_statistics(self, trajectory: Trajectory, execution_time: float, namespaces: list[str]):
+    def _update_statistics(self, trajectory: Trajectory, execution_time: float, namespaces: list[str]) -> None:
         """Update system statistics"""
         self.stats["total_tasks"] += 1
 
@@ -707,7 +708,7 @@ class MemppSystem:
 
     # ============= Pinecone-specific Operations =============
 
-    async def optimize_pinecone_index(self):
+    async def optimize_pinecone_index(self) -> None:
         """Optimize Pinecone index for better performance"""
         logger.info("Starting Pinecone index optimization")
 
@@ -739,7 +740,9 @@ class MemppSystem:
 
         logger.info("Pinecone index optimization completed")
 
-    async def migrate_namespace(self, from_namespace: str, to_namespace: str, criteria: dict | None = None):
+    async def migrate_namespace(
+        self, from_namespace: str, to_namespace: str, criteria: dict[str, Any] | None = None
+    ) -> list[UpdateResult]:
         """Migrate memories between Pinecone namespaces"""
         logger.info(f"Migrating from {from_namespace} to {to_namespace}")
 
@@ -903,7 +906,7 @@ class MemppSystem:
 class MemppSystemAPI:
     """FastAPI wrapper for MempSystem with Pinecone endpoints"""
 
-    def __init__(self, memp_system: MemppSystem):
+    def __init__(self, memp_system: MemppSystem) -> None:
         self.system = memp_system
 
         @asynccontextmanager
@@ -943,7 +946,9 @@ class MemppSystemAPI:
             return {"error": "Task not found or still processing"}
 
         @self.app.post("/migrate")
-        async def migrate_namespace(from_ns: str, to_ns: str, criteria: dict[str, Any] | None = None) -> dict[str, Any]:
+        async def migrate_namespace(
+            from_ns: str, to_ns: str, criteria: dict[str, Any] | None = None
+        ) -> dict[str, Any]:
             """Migrate memories between Pinecone namespaces"""
             results = await self.system.migrate_namespace(from_ns, to_ns, criteria)
             return {"migrated": len(results), "from": from_ns, "to": to_ns}

@@ -147,7 +147,7 @@ class ProceduralMemory(BaseModel):
     sparse_embedding: dict[str, float] | None = None  # For hybrid search
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    def increment_usage(self, success: bool):
+    def increment_usage(self, success: bool) -> None:
         """Update usage statistics"""
         self.usage_count += 1
         self.success_rate = (self.success_rate * (self.usage_count - 1) + (1.0 if success else 0.0)) / self.usage_count
@@ -212,7 +212,7 @@ class EmbeddingModel(Protocol):
 class MultilingualE5Embedder:
     """Multilingual E5 Large embedding model"""
 
-    def __init__(self, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+    def __init__(self, device: str = "cuda" if torch.cuda.is_available() else "cpu") -> None:
         if torch.backends.mps.is_built():
             device = "mps"
 
@@ -231,7 +231,7 @@ class MultilingualE5Embedder:
 class OpenAIEmbedder:
     """OpenAI text-embedding-3-large model"""
 
-    def __init__(self, api_key: str | None = None):
+    def __init__(self, api_key: str | None = None) -> None:
         self.client = OpenAI(api_key=api_key)
         self.model = "text-embedding-3-large"
 
@@ -253,7 +253,7 @@ class OpenAIEmbedder:
 class MemoryBuilder(ABC):
     """Abstract base class for memory builders"""
 
-    def __init__(self, embedder: EmbeddingModel, sparse_encoder: BM25Encoder | None = None):
+    def __init__(self, embedder: EmbeddingModel, sparse_encoder: BM25Encoder | None = None) -> None:
         self.embedder = embedder
         self.sparse_encoder = sparse_encoder
 
@@ -358,7 +358,7 @@ class ScriptBuilder(MemoryBuilder):
 
     def __init__(
         self, embedder: EmbeddingModel, sparse_encoder: BM25Encoder | None = None, llm_client: Any | None = None
-    ):
+    ) -> None:
         super().__init__(embedder, sparse_encoder)
         self.llm_client = llm_client or anthropic.Anthropic()
 
@@ -468,7 +468,7 @@ class ProceduralizationBuilder(MemoryBuilder):
         sparse_encoder: BM25Encoder | None = None,
         trajectory_builder: TrajectoryBuilder | None = None,
         script_builder: ScriptBuilder | None = None,
-    ):
+    ) -> None:
         super().__init__(embedder, sparse_encoder)
         self.trajectory_builder = trajectory_builder or TrajectoryBuilder(embedder, sparse_encoder)
         self.script_builder = script_builder or ScriptBuilder(embedder, sparse_encoder)
@@ -555,7 +555,7 @@ class PineconeMemoryStorage:
         dimension: int = 1024,
         metric: str = "dotproduct",
         use_serverless: bool = True,
-    ):
+    ) -> None:
         # Initialize Pinecone
         self.pc = Pinecone(api_key=api_key)
         self.index_name = index_name
@@ -573,13 +573,14 @@ class PineconeMemoryStorage:
 
         logger.info(f"Pinecone storage initialized with index: {index_name}")
 
-    def _init_index(self, environment: str, metric: str, use_serverless: bool):
+    def _init_index(self, environment: str, metric: str, use_serverless: bool) -> None:
         """Initialize Pinecone index"""
 
         existing_indexes = [index.name for index in self.pc.list_indexes()]
 
         if self.index_name not in existing_indexes:
             # Create new index
+            spec: ServerlessSpec | PodSpec
             if use_serverless:
                 spec = ServerlessSpec(cloud="aws", region=environment)
             else:
@@ -656,7 +657,7 @@ class PineconeMemoryStorage:
         )
         return memory_id
 
-    async def _persist_memory(self, memory: ProceduralMemory):
+    async def _persist_memory(self, memory: ProceduralMemory) -> None:
         """Persist memory to disk as backup"""
         storage_path = Path("./mempp_storage")
         storage_path.mkdir(parents=True, exist_ok=True)
@@ -680,10 +681,10 @@ class PineconeMemoryStorage:
         query_vector: np.ndarray,
         namespace: str = "proceduralized",
         top_k: int = 5,
-        filter: dict | None = None,
+        filter: dict[str, Any] | None = None,
         include_metadata: bool = True,
         sparse_vector: dict[str, float] | None = None,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Query Pinecone index"""
 
         # Prepare query
@@ -712,7 +713,7 @@ class PineconeMemoryStorage:
         matches = getattr(results, "matches", results)
         return cast(list[dict[str, Any]], matches)
 
-    def delete(self, memory_id: str, namespace: str = "proceduralized"):
+    def delete(self, memory_id: str, namespace: str = "proceduralized") -> None:
         """Delete memory from Pinecone"""
         self.index.delete(ids=[memory_id], namespace=namespace)
 
@@ -721,7 +722,7 @@ class PineconeMemoryStorage:
 
         logger.info(f"Deleted memory: {memory_id} from namespace: {namespace}")
 
-    def update_metadata(self, memory_id: str, metadata: dict, namespace: str = "proceduralized"):
+    def update_metadata(self, memory_id: str, metadata: dict[str, Any], namespace: str = "proceduralized") -> None:
         """Update memory metadata in Pinecone"""
         self.index.update(id=memory_id, set_metadata=metadata, namespace=namespace)
 
@@ -750,7 +751,7 @@ class MemppBuildPipeline:
         embedder: EmbeddingModel | None = None,
         storage: PineconeMemoryStorage | None = None,
         llm_client: Any | None = None,
-    ):
+    ) -> None:
         self.embedder: EmbeddingModel = embedder or MultilingualE5Embedder()
         self.storage = storage or PineconeMemoryStorage(api_key=pinecone_api_key)
         self.llm_client = llm_client
@@ -765,7 +766,7 @@ class MemppBuildPipeline:
             self.embedder, self.sparse_encoder, self.trajectory_builder, self.script_builder
         )
 
-        self.build_stats = {"total_processed": 0, "successful_builds": 0, "failed_builds": 0, "build_times": []}
+        self.build_stats: dict[str, Any] = {"total_processed": 0, "successful_builds": 0, "failed_builds": 0, "build_times": []}
 
     async def build_from_trajectory(
         self, trajectory: Trajectory, strategy: str = "proceduralization"
@@ -775,6 +776,7 @@ class MemppBuildPipeline:
         start_time = datetime.now()
 
         try:
+            memory: ProceduralMemory
             match strategy:
                 case "trajectory":
                     memory = await self.trajectory_builder.build(trajectory)
