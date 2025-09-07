@@ -10,8 +10,7 @@ from .types import ProceduralMemory
 class _IndexStats:
     """Shape-compatible object for `index.describe_index_stats()` results.
 
-    Provides an attribute `namespaces` (dict) mimicking Pinecone SDK's structure
-    that code in update/system expects.
+    Provides an attribute `namespaces` (dict) mimicking Pinecone SDK's structure.
     """
 
     def __init__(self, namespaces: dict[str, dict[str, int]]):
@@ -70,6 +69,7 @@ class PineconeMemoryStorage:
     # ===== CRUD =====
 
     async def store(self, memory: ProceduralMemory, namespace: str = "proceduralized") -> str:
+        """Persist a memory and its vector/metadata to a namespace."""
         self.memories[memory.memory_id] = memory
         self._vectors.setdefault(namespace, {})[memory.memory_id] = memory.embedding.astype(np.float32)
         self._metadata.setdefault(namespace, {})[memory.memory_id] = {
@@ -80,11 +80,13 @@ class PineconeMemoryStorage:
         return memory.memory_id
 
     def delete(self, memory_id: str, namespace: str = "proceduralized") -> None:
+        """Remove a memory and its data from a namespace."""
         self._vectors.get(namespace, {}).pop(memory_id, None)
         self._metadata.get(namespace, {}).pop(memory_id, None)
         self.memories.pop(memory_id, None)
 
     def update_metadata(self, memory_id: str, metadata: dict[str, Any], namespace: str = "proceduralized") -> None:
+        """Merge `metadata` into existing metadata for a memory in `namespace`."""
         ns_table = self._metadata.setdefault(namespace, {})
         base = ns_table.get(memory_id, {})
         base.update(metadata)
@@ -119,6 +121,7 @@ class PineconeMemoryStorage:
         sparse_vector: dict[str, float] | None = None,
         filter: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
+        """Return top‑k matches from `namespace` with optional sparse and metadata filter."""
         # Collect candidates
         vecs = self._vectors.get(namespace, {})
         candidates: list[tuple[str, float]] = []
@@ -171,6 +174,7 @@ class PineconeMemoryStorage:
     # ===== Stats =====
 
     def get_statistics(self) -> dict[str, Any]:
+        """Return total vector counts and per‑namespace counts."""
         namespaces: dict[str, dict[str, int]] = {}
         total = 0
         for ns, table in self._vectors.items():

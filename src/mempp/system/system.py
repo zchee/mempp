@@ -1,15 +1,15 @@
 import asyncio
+import inspect
 import json
 import uuid
 from collections import defaultdict, deque
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
 from typing import Any, Protocol
-from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 import anthropic
 import numpy as np
@@ -17,8 +17,7 @@ import psutil
 import ray
 import structlog
 import uvicorn
-import yaml
-from aiokafka import AIOKafkaProducer, AIOKafkaConsumer
+from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from fastapi import FastAPI
 from pinecone_text.sparse import BM25Encoder
 from prometheus_client import Counter, Gauge, Histogram, Summary
@@ -36,6 +35,7 @@ from mempp.build import (
     TaskStatus,
     Trajectory,
 )
+from mempp.config import MemppSystemConfig, RetrievalStrategyName, UpdateStrategyName
 from mempp.retrieve import (
     MemppRetrievalPipeline,
     RetrievalConfig,
@@ -109,75 +109,7 @@ class TaskResponse:
 
 
 # ============= Configuration Management =============
-
-
-@dataclass
-class MemppSystemConfig:
-    """Complete system configuration with Pinecone settings"""
-
-    # Pinecone configuration
-    pinecone_api_key: str
-    pinecone_environment: str = "us-east-1"
-    pinecone_index_name: str = "mempp-memories"
-    pinecone_metric: str = "dotproduct"
-    pinecone_use_serverless: bool = True
-    pinecone_dimension: int = 1024
-
-    # Namespace configuration
-    default_namespaces: list[str] = field(default_factory=lambda: ["proceduralized", "script", "trajectory"])
-    namespace_auto_balance: bool = True
-    max_vectors_per_namespace: int = 5000
-
-    # Build configuration
-    build_strategy: str = "proceduralization"
-    enable_sparse_vectors: bool = True  # Enable hybrid search
-
-    # Retrieval configuration
-    retrieval_strategy: RetrievalStrategy = RetrievalStrategy.CASCADING
-    retrieval_top_k: int = 5
-    similarity_threshold: float = 0.7
-    use_reranking: bool = True
-    use_caching: bool = True
-    use_hybrid_search: bool = True  # Pinecone hybrid search
-    alpha: float = 0.7  # Dense vs sparse weight
-
-    # Update configuration
-    update_strategy: UpdateStrategy = UpdateStrategy.ADJUSTMENT
-    update_interval: int = 10
-    reflection_enabled: bool = True
-    continuous_learning: bool = True
-    max_total_memories: int = 20000
-    consolidation_threshold: float = 0.9
-    namespace_migration_enabled: bool = True
-
-    # System configuration
-    enable_metrics: bool = True
-    enable_distributed: bool = False
-    redis_url: str | None = None
-    kafka_brokers: list[str] | None = None
-
-    # API keys
-    openai_api_key: str | None = None
-    anthropic_api_key: str | None = None
-    gemini_api_key: str | None = None
-
-    # Performance
-    max_concurrent_tasks: int = 10
-    task_timeout: float = 300.0
-    batch_size: int = 20
-
-    @classmethod
-    def from_yaml(cls, path: Path) -> "MemppSystemConfig":
-        """Load configuration from YAML file"""
-        with open(path) as f:
-            config_dict = yaml.safe_load(f)
-        return cls(**config_dict)
-
-    def to_yaml(self, path: Path) -> None:
-        """Save configuration to YAML file"""
-        config_dict = self.__dict__.copy()
-        with open(path, "w") as f:
-            yaml.dump(config_dict, f, default_flow_style=False)
+# Moved to mempp.config.MemppSystemConfig (imported above)
 
 
 # ============= Event System =============
@@ -221,7 +153,9 @@ class EventBus:
     """Event bus for system-wide communication"""
 
     def __init__(self, kafka_brokers: list[str] | None = None) -> None:
-        self.listeners: defaultdict[EventType, list[Callable[[SystemEvent], Any]]] = defaultdict(list)
+        self.listeners: defaultdict[
+            EventType, list[Callable[[SystemEvent], Any] | Callable[[SystemEvent], Awaitable[Any]]]
+        ] = defaultdict(list)
         self.kafka_brokers = kafka_brokers
         self.producer: AIOKafkaProducer | None = None
         self.consumer: AIOKafkaConsumer | None = None
@@ -240,21 +174,26 @@ class EventBus:
 
     async def publish(self, event: SystemEvent) -> None:
         """Publish an event"""
-        # Local listeners
+        # Local listeners (support sync and async)
         for listener in self.listeners[event.event_type]:
             try:
-                await listener(event)
+                if inspect.iscoroutinefunction(listener):
+                    await listener(event)  # type: ignore[misc]
+                else:
+                    listener(event)  # type: ignore[misc]
             except Exception as e:
                 logger.error(f"Listener error: {e}")
 
         # Kafka if available
         if self.producer:
             try:
-                await self.producer.send("memp_events", value=event.to_dict())
+                await self.producer.send_and_wait("mempp_events", value=event.to_dict())
             except Exception as e:
                 logger.error(f"Kafka publish error: {e}")
 
-    def subscribe(self, event_type: EventType, listener: Callable[[SystemEvent], Any]) -> None:
+    def subscribe(
+        self, event_type: EventType, listener: Callable[[SystemEvent], Any] | Callable[[SystemEvent], Awaitable[Any]]
+    ) -> None:
         """Subscribe to events"""
         self.listeners[event_type].append(listener)
 
@@ -439,7 +378,7 @@ class MemppSystem:
         }
 
         logger.info(
-            "MempSystem initialized with Pinecone",
+            "MemppSystem initialized with Pinecone",
             index=config.pinecone_index_name,
             environment=config.pinecone_environment,
         )
@@ -456,8 +395,11 @@ class MemppSystem:
         )
 
         # Retrieval pipeline
+        # Convert lightweight enum from config to runtime enum for retrieval
         retrieval_config = RetrievalConfig(
-            strategy=self.config.retrieval_strategy,
+            strategy=RetrievalStrategy[self.config.retrieval_strategy.name]
+            if hasattr(self.config.retrieval_strategy, "name")
+            else RetrievalStrategy.CASCADING,
             top_k=self.config.retrieval_top_k,
             similarity_threshold=self.config.similarity_threshold,
             use_reranking=self.config.use_reranking,
@@ -499,11 +441,11 @@ class MemppSystem:
 
     def _init_metrics(self) -> None:
         """Initialize Prometheus metrics"""
-        self.task_counter = Counter("memp_tasks_total", "Total number of tasks processed", ["status", "namespace"])
-        self.memory_counter = Gauge("memp_memories_total", "Total number of stored memories")
-        self.namespace_counter = Gauge("memp_namespace_vectors", "Vectors per namespace", ["namespace"])
-        self.execution_time = Histogram("memp_task_execution_seconds", "Task execution time in seconds")
-        self.retrieval_score = Summary("memp_retrieval_score", "Memory retrieval relevance scores")
+        self.task_counter = Counter("mempp_tasks_total", "Total number of tasks processed", ["status", "namespace"])
+        self.memory_counter = Gauge("mempp_memories_total", "Total number of stored memories")
+        self.namespace_counter = Gauge("mempp_namespace_vectors", "Vectors per namespace", ["namespace"])
+        self.execution_time = Histogram("mempp_task_execution_seconds", "Task execution time in seconds")
+        self.retrieval_score = Summary("mempp_retrieval_score", "Memory retrieval relevance scores")
 
     async def initialize(self) -> None:
         """Initialize the system"""
@@ -520,7 +462,7 @@ class MemppSystem:
         if self.config.enable_distributed:
             await self._init_distributed()
 
-        logger.info("MempSystem initialized successfully")
+        logger.info("MemppSystem initialized successfully")
 
     async def _init_distributed(self) -> None:
         """Initialize distributed components"""
@@ -543,33 +485,29 @@ class MemppSystem:
                     EventType.TASK_STARTED,
                     datetime.now(),
                     {"task_id": request.task_id, "description": request.description},
-                    "MempSystem",
+                    "MemppSystem",
                 )
             )
 
             # Step 1: Retrieve relevant memories from Pinecone
             logger.info("Retrieving memories from Pinecone", task_id=request.task_id)
 
-            # Use preferred namespace if specified
-            original_namespaces: list[str] | None = None
-            if request.preferred_namespace:
-                original_namespaces = self.retrieval_pipeline.config.search_namespaces
-                self.retrieval_pipeline.config.search_namespaces = [request.preferred_namespace]
+            _strategy = (
+                RetrievalStrategy[self.config.retrieval_strategy.name]
+                if hasattr(self.config.retrieval_strategy, "name")
+                else RetrievalStrategy.CASCADING
+            )
 
             retrieved_memories = await self.retrieval_pipeline.retrieve(
                 query=request.description,
-                strategy=self.config.retrieval_strategy,
+                strategy=_strategy,
                 top_k=self.config.retrieval_top_k,
                 namespace=request.preferred_namespace,
                 use_external_search=bool(self.config.gemini_api_key),
             )
 
-            # Restore original namespaces
-            if original_namespaces is not None:
-                self.retrieval_pipeline.config.search_namespaces = original_namespaces
-
             # Track namespaces used
-            namespaces_used = list(set([r.namespace for r in retrieved_memories]))
+            namespaces_used = list({r.namespace for r in retrieved_memories})
 
             # Log retrieval scores
             if retrieved_memories:
@@ -598,10 +536,15 @@ class MemppSystem:
             # Determine which memory led to failure (if any)
             retrieval_result = retrieved_memories[0] if retrieved_memories else None
 
+            _upd = (
+                UpdateStrategy[self.config.update_strategy.name]
+                if hasattr(self.config.update_strategy, "name")
+                else UpdateStrategy.VALIDATION
+            )
             update_results = await self.update_pipeline.update_after_task(
                 trajectory=trajectory,
                 retrieval_result=retrieval_result if trajectory.status != TaskStatus.SUCCESS else None,
-                strategy=self.config.update_strategy,
+                strategy=_upd,
             )
 
             # Update statistics
@@ -643,7 +586,7 @@ class MemppSystem:
                     EventType.TASK_COMPLETED,
                     datetime.now(),
                     {"task_id": request.task_id, "status": trajectory.status.name, "namespaces": namespaces_used},
-                    "MempSystem",
+                    "MemppSystem",
                 )
             )
 
@@ -666,7 +609,7 @@ class MemppSystem:
             # Emit failure event
             await self.event_bus.publish(
                 SystemEvent(
-                    EventType.TASK_FAILED, datetime.now(), {"task_id": request.task_id, "error": str(e)}, "MempSystem"
+                    EventType.TASK_FAILED, datetime.now(), {"task_id": request.task_id, "error": str(e)}, "MemppSystem"
                 )
             )
 
@@ -734,7 +677,7 @@ class MemppSystem:
                 EventType.INDEX_OPTIMIZED,
                 datetime.now(),
                 {"index": self.config.pinecone_index_name, "stats": stats},
-                "MempSystem",
+                "MemppSystem",
             )
         )
 
@@ -769,7 +712,7 @@ class MemppSystem:
                     EventType.NAMESPACE_MIGRATED,
                     datetime.now(),
                     {"from": from_namespace, "to": to_namespace, "count": len(results), "criteria": criteria},
-                    "MempSystem",
+                    "MemppSystem",
                 )
             )
 
@@ -850,7 +793,7 @@ class MemppSystem:
         }
 
         # Emit health check event
-        await self.event_bus.publish(SystemEvent(EventType.SYSTEM_HEALTH_CHECK, datetime.now(), health, "MempSystem"))
+        await self.event_bus.publish(SystemEvent(EventType.SYSTEM_HEALTH_CHECK, datetime.now(), health, "MemppSystem"))
 
         return health
 
@@ -871,7 +814,7 @@ class MemppSystem:
     async def shutdown(self) -> None:
         """Gracefully shutdown the system"""
 
-        logger.info("Shutting down MempSystem")
+        logger.info("Shutting down MemppSystem")
 
         # Stop workers
         if self.workers:
@@ -881,7 +824,14 @@ class MemppSystem:
 
         # Final batch update
         if self.update_pipeline.pending_updates:
-            await self.update_pipeline.batch_update(self.config.update_strategy)
+            from mempp.update import UpdateStrategy as _US
+
+            _upd = (
+                _US[self.config.update_strategy.name]
+                if hasattr(self.config.update_strategy, "name")
+                else _US.VALIDATION
+            )
+            await self.update_pipeline.batch_update(_upd)
 
         # Optimize Pinecone index before shutdown
         await self.optimize_pinecone_index()
@@ -897,14 +847,14 @@ class MemppSystem:
         stats = self.get_statistics()
         logger.info("Final statistics", stats=stats)
 
-        logger.info("MempSystem shutdown complete")
+        logger.info("MemppSystem shutdown complete")
 
 
 # ============= REST API =============
 
 
 class MemppSystemAPI:
-    """FastAPI wrapper for MempSystem with Pinecone endpoints"""
+    """FastAPI wrapper for MemppSystem with Pinecone endpoints"""
 
     def __init__(self, memp_system: MemppSystem) -> None:
         self.system = memp_system
@@ -946,9 +896,7 @@ class MemppSystemAPI:
             return {"error": "Task not found or still processing"}
 
         @self.app.post("/migrate")
-        async def migrate_namespace(
-            from_ns: str, to_ns: str, criteria: dict[str, Any] | None = None
-        ) -> dict[str, Any]:
+        async def migrate_namespace(from_ns: str, to_ns: str, criteria: dict[str, Any] | None = None) -> dict[str, Any]:
             """Migrate memories between Pinecone namespaces"""
             results = await self.system.migrate_namespace(from_ns, to_ns, criteria)
             return {"migrated": len(results), "from": from_ns, "to": to_ns}
@@ -978,7 +926,7 @@ class MemppSystemAPI:
 
 
 async def example_usage() -> None:
-    """Comprehensive example of MempSystem with Pinecone"""
+    """Comprehensive example of MemppSystem with Pinecone"""
 
     import os
 
@@ -987,8 +935,8 @@ async def example_usage() -> None:
         pinecone_api_key=os.getenv("PINECONE_API_KEY", "your-api-key"),
         pinecone_environment="us-east-1",
         pinecone_index_name="mempp-demo",
-        retrieval_strategy=RetrievalStrategy.CASCADING,
-        update_strategy=UpdateStrategy.ADJUSTMENT,
+        retrieval_strategy=RetrievalStrategyName.CASCADING,
+        update_strategy=UpdateStrategyName.ADJUSTMENT,
         continuous_learning=True,
         namespace_migration_enabled=True,
         enable_metrics=True,
@@ -998,7 +946,7 @@ async def example_usage() -> None:
     system = MemppSystem(config=config)
     await system.initialize()
 
-    print("=== MempSystem with Pinecone Demo ===\n")
+    print("=== MemppSystem with Pinecone Demo ===\n")
 
     # Example tasks
     task_descriptions = [

@@ -10,18 +10,32 @@ from datetime import datetime
 from enum import Enum, auto
 from typing import Any, cast
 
-import google.genai as genai
 import numpy as np
-import redis
-import spacy
-import yake
+
+try:  # Prefer async client to avoid blocking
+    import redis.asyncio as redis  # type: ignore[assignment]
+except Exception:  # pragma: no cover - fallback to sync (used via to_thread)
+    import redis  # type: ignore[no-redef]
 from cachetools import TTLCache
-from keybert import KeyBERT
-from pinecone_text.sparse import BM25Encoder
-from sentence_transformers import CrossEncoder
-from sklearn.metrics.pairwise import cosine_similarity
 from tenacity import retry, stop_after_attempt, wait_exponential
-from transformers import pipeline
+
+# Optional heavy dependencies with safe fallbacks
+try:
+    from pinecone_text.sparse import BM25Encoder  # type: ignore
+except Exception:  # pragma: no cover
+
+    class BM25Encoder:  # type: ignore[no-redef]
+        def fit(self, *_: Any, **__: Any) -> None:
+            """No-op when pinecone_text is unavailable."""
+
+        def encode_documents(self, *_: Any, **__: Any) -> Any:
+            raise ValueError("BM25 not available")
+
+
+try:
+    import google.genai as genai  # type: ignore
+except Exception:  # pragma: no cover
+    genai = None  # type: ignore[assignment]
 
 # Import from Build component
 from mempp.build import (
@@ -105,49 +119,67 @@ class QueryKeyExtractor(KeyExtractor):
 
 class KeywordExtractor(KeyExtractor):
     def __init__(self) -> None:
-        # Initialize KeyBERT for keyword extraction
-        self.keybert = KeyBERT("paraphrase-MiniLM-L6-v2")
+        # Optional heavy tools; gracefully degrade if unavailable
+        self.keybert = None  # type: ignore[assignment]
+        self.yake = None  # type: ignore[assignment]
+        self.nlp = None  # type: ignore[assignment]
+        try:  # KeyBERT
+            from keybert import KeyBERT as _KeyBERT  # type: ignore
 
-        # Initialize YAKE for statistical keyword extraction
-        self.yake = yake.KeywordExtractor(
-            lan="en",
-            n=3,  # max n-gram size
-            dedupLim=0.7,
-            top=10,
-            features=None,
-        )
+            self.keybert = _KeyBERT("paraphrase-MiniLM-L6-v2")
+        except Exception:
+            pass
+        try:  # YAKE
+            import yake as _yake  # type: ignore
 
-        # Load spaCy for NER and POS tagging
-        try:
-            self.nlp = spacy.load("en_core_web_lg")
-        except:
-            import subprocess
+            self.yake = _yake.KeywordExtractor(lan="en", n=3, dedupLim=0.7, top=10, features=None)
+        except Exception:
+            pass
+        try:  # spaCy (small model, no auto-download)
+            import spacy as _spacy  # type: ignore
 
-            subprocess.run(["python", "-m", "spacy", "download", "en_core_web_lg"])
-            self.nlp = spacy.load("en_core_web_lg")
+            self.nlp = _spacy.load("en_core_web_sm")
+        except Exception:
+            pass
 
     def extract(self, text: str) -> list[str]:
         """Extract keywords using multiple methods"""
         keywords = set()
 
         # KeyBERT extraction
-        keybert_keywords = self.keybert.extract_keywords(
-            text, keyphrase_ngram_range=(1, 2), stop_words="english", top_n=5
-        )
-        keywords.update([kw[0] for kw in keybert_keywords])
+        if getattr(self, "keybert", None) is not None:
+            try:
+                keyb: Any = self.keybert
+                keybert_keywords = keyb.extract_keywords(  # type: ignore[no-any-return]
+                    text, keyphrase_ngram_range=(1, 2), stop_words="english", top_n=5
+                )
+                keywords.update([kw[0] for kw in keybert_keywords])
+            except Exception:
+                pass
 
         # YAKE extraction
-        yake_keywords = self.yake.extract_keywords(text)
-        keywords.update([kw[0] for kw in yake_keywords[:5]])
+        if getattr(self, "yake", None) is not None:
+            from contextlib import suppress
+
+            with suppress(Exception):
+                yake_keywords = self.yake.extract_keywords(text)  # type: ignore[union-attr]
+                keywords.update([kw[0] for kw in yake_keywords[:5]])
 
         # SpaCy NER and important nouns
-        doc = self.nlp(text)
-        # Named entities
-        keywords.update([ent.text.lower() for ent in doc.ents])
-        # Important nouns and verbs
-        keywords.update(
-            [token.text.lower() for token in doc if token.pos_ in ["NOUN", "VERB"] and not token.is_stop][:5]
-        )
+        if getattr(self, "nlp", None) is not None:
+            try:
+                doc = self.nlp(text)  # type: ignore[union-attr]
+                keywords.update([ent.text.lower() for ent in doc.ents])
+                keywords.update(
+                    [token.text.lower() for token in doc if token.pos_ in ["NOUN", "VERB"] and not token.is_stop][:5]
+                )
+            except Exception:
+                pass
+        else:
+            # Simple fallback: split on spaces
+            for tok in text.split():
+                if len(tok) > 3:
+                    keywords.add(tok.lower())
 
         return list(keywords)
 
@@ -157,12 +189,15 @@ class AveFactExtractor(KeyExtractor):
 
     def __init__(self) -> None:
         self.keyword_extractor = KeywordExtractor()
-        # Initialize fact extraction pipeline
-        self.fact_extractor = pipeline(
-            "token-classification",
-            model="dslim/bert-base-NER",
-            aggregation_strategy="simple",
-        )
+        # Initialize fact extraction pipeline (optional heavy)
+        try:
+            from transformers import pipeline as _pipeline  # type: ignore
+
+            self.fact_extractor = _pipeline(
+                "token-classification", model="dslim/bert-base-NER", aggregation_strategy="simple"
+            )
+        except Exception:
+            self.fact_extractor = lambda _text: []  # type: ignore[assignment]
 
     def extract(self, text: str) -> dict[str, list[str]]:
         """Extract facts with importance scores"""
@@ -198,8 +233,8 @@ class SimilarityCalculator:
     def __init__(self, embedder: EmbeddingModel, sparse_encoder: BM25Encoder | None = None) -> None:
         self.embedder = embedder
         self.sparse_encoder = sparse_encoder
-        # Initialize cross-encoder for reranking
-        self.cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-12-v2")
+        # Lazily initialize cross-encoder only when reranking is actually used (import heavy deps at call time)
+        self._cross_encoder: Any | None = None
 
     def cosine_similarity(self, query_embedding: np.ndarray, memory_embeddings: np.ndarray) -> np.ndarray:
         """Calculate cosine similarity"""
@@ -207,13 +242,22 @@ class SimilarityCalculator:
             query_embedding = query_embedding.reshape(1, -1)
         if memory_embeddings.ndim == 1:
             memory_embeddings = memory_embeddings.reshape(1, -1)
-
-        return cosine_similarity(query_embedding, memory_embeddings)[0]
+        qe = query_embedding / (np.linalg.norm(query_embedding, axis=1, keepdims=True) + 1e-12)
+        me = memory_embeddings / (np.linalg.norm(memory_embeddings, axis=1, keepdims=True) + 1e-12)
+        return (qe @ me.T)[0]
 
     def cross_encode_similarity(self, query: str, memory_patterns: list[str]) -> np.ndarray:
-        """Calculate similarity using cross-encoder"""
+        """Calculate similarity using cross-encoder (lazy load)."""
+        if self._cross_encoder is None:
+            try:
+                from sentence_transformers import CrossEncoder  # type: ignore
+
+                self._cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-12-v2")
+            except Exception as e:  # graceful fallback when model unavailable
+                logger.warning(f"Cross-encoder unavailable; skipping rerank: {e}")
+                return np.zeros(len(memory_patterns), dtype=np.float32)
         pairs = [[query, pattern] for pattern in memory_patterns]
-        scores = self.cross_encoder.predict(pairs)
+        scores = self._cross_encoder.predict(pairs)
         return np.array(scores)
 
     def create_sparse_vector(self, text: str) -> dict[str, float]:
@@ -224,13 +268,16 @@ class SimilarityCalculator:
         """
         if not self.sparse_encoder:
             return {}
-
-        raw: Any = self.sparse_encoder.encode_documents([text])
+        try:
+            raw: Any = self.sparse_encoder.encode_documents([text])
+        except Exception:
+            # Encoder not fitted or unavailable; fall back to dense-only
+            return {}
         if isinstance(raw, list) and raw and isinstance(raw[0], dict):
             return cast(dict[str, float], raw[0])
         if hasattr(raw, "indices") and hasattr(raw, "values"):
             try:
-                return {str(i): float(v) for i, v in zip(raw.indices, raw.values)}  # type: ignore[attr-defined]
+                return {str(i): float(v) for i, v in zip(raw.indices, raw.values, strict=False)}  # type: ignore[attr-defined]
             except Exception:
                 return {}
         return {}
@@ -245,14 +292,21 @@ class RetrievalCache:
     def __init__(self, redis_url: str | None = None, ttl: int = 3600) -> None:
         self.ttl = ttl
 
-        # Try to connect to Redis if available
-        self.redis_client = None
+        # Try to connect to Redis (async client if available)
+        self.redis_client: Any | None = None
         if redis_url:
             try:
-                self.redis_client = redis.from_url(redis_url)
-                self.redis_client.ping()
+                self.redis_client = redis.from_url(redis_url)  # type: ignore[attr-defined]
+                # Ping may be sync or async depending on client
+                ping = getattr(self.redis_client, "ping", None)
+                if ping is not None:
+                    maybe_await = ping()
+                    if hasattr(maybe_await, "__await__"):
+                        import asyncio as _asyncio
+
+                        _asyncio.get_event_loop().run_until_complete(maybe_await)  # best-effort
                 logger.info("Connected to Redis cache")
-            except:
+            except Exception:
                 logger.warning("Redis not available, using in-memory cache")
 
         # Fallback to in-memory cache
@@ -267,14 +321,16 @@ class RetrievalCache:
         """Get cached results"""
         key = self._get_cache_key(query, strategy, top_k, namespace)
 
-        # Try Redis first
-        if self.redis_client:
+        # Try Redis first (async if available)
+        if self.redis_client is not None:
             try:
-                cached = self.redis_client.get(key)
-                if cached:
-                    from typing import cast
-
-                    return pickle.loads(cast(bytes, cached))
+                get_fn = getattr(self.redis_client, "get", None)
+                if get_fn is not None:
+                    cached = get_fn(key)
+                    if hasattr(cached, "__await__"):
+                        cached = await cached  # type: ignore[assignment]
+                    if cached:
+                        return pickle.loads(cached)  # type: ignore[arg-type]
             except Exception as e:
                 logger.debug(f"Redis get error: {e}")
 
@@ -293,9 +349,13 @@ class RetrievalCache:
         key = self._get_cache_key(query, strategy, top_k, namespace)
 
         # Cache in Redis if available
-        if self.redis_client:
+        if self.redis_client is not None:
             try:
-                self.redis_client.setex(key, self.ttl, pickle.dumps(results))
+                setex = getattr(self.redis_client, "setex", None)
+                if setex is not None:
+                    res = setex(key, self.ttl, pickle.dumps(results))
+                    if hasattr(res, "__await__"):
+                        await res
             except Exception as e:
                 logger.debug(f"Redis set error: {e}")
 
@@ -312,7 +372,8 @@ class GeminiSearchIntegration:
     def __init__(self, api_key: str | None = None) -> None:
         # The google-genai library API differs from google-generativeai.
         # Use typing casts to avoid strict attribute checks.
-        from typing import Any, cast as _cast
+        from typing import Any
+        from typing import cast as _cast
 
         _genai = _cast(Any, genai)
         if api_key:
@@ -344,9 +405,7 @@ class GeminiSearchIntegration:
         """
 
         try:
-            response = await asyncio.to_thread(
-                getattr(self.model, "generate_content"), prompt, tools="google_search_retrieval"
-            )
+            response = await asyncio.to_thread(self.model.generate_content, prompt, tools="google_search_retrieval")
 
             # Parse response for similar patterns (support both .text and .output_text)
             text = getattr(response, "text", None) or getattr(response, "output_text", "")
@@ -390,9 +449,9 @@ class PineconeRetriever(ABC):
         self.config = config
 
     @abstractmethod
-    async def retrieve(self, query: str, top_k: int = 5) -> list[RetrievalResult]:
-        """Retrieve relevant memories"""
-        pass
+    async def retrieve(self, query: str, top_k: int = 5, namespaces: list[str] | None = None) -> list[RetrievalResult]:
+        """Retrieve relevant memories. If `namespaces` is provided, restrict search."""
+        raise NotImplementedError
 
     def _convert_matches_to_results(
         self, matches: list[dict[str, Any]], strategy: str, retrieval_time: float, namespace: str
@@ -433,7 +492,7 @@ class QueryBasedPineconeRetriever(PineconeRetriever):
         self.embedder = embedder
         self.similarity_calc = similarity_calc
 
-    async def retrieve(self, query: str, top_k: int = 5) -> list[RetrievalResult]:
+    async def retrieve(self, query: str, top_k: int = 5, namespaces: list[str] | None = None) -> list[RetrievalResult]:
         """Retrieve based on query similarity using Pinecone"""
         start_time = datetime.now()
 
@@ -447,8 +506,8 @@ class QueryBasedPineconeRetriever(PineconeRetriever):
 
         all_results = []
 
-        # Search across configured namespaces
-        for namespace in self.config.search_namespaces:
+        # Search across provided or configured namespaces
+        for namespace in namespaces or self.config.search_namespaces:
             matches = self.storage.query(
                 query_vector=query_embedding,
                 namespace=namespace,
@@ -485,7 +544,7 @@ class HybridPineconeRetriever(PineconeRetriever):
         self.similarity_calc = similarity_calc
         self.keyword_extractor = KeywordExtractor()
 
-    async def retrieve(self, query: str, top_k: int = 5) -> list[RetrievalResult]:
+    async def retrieve(self, query: str, top_k: int = 5, namespaces: list[str] | None = None) -> list[RetrievalResult]:
         """Retrieve using Pinecone's hybrid search"""
         start_time = datetime.now()
 
@@ -495,13 +554,12 @@ class HybridPineconeRetriever(PineconeRetriever):
         # Get sparse embedding for hybrid search
         sparse_vector = self.similarity_calc.create_sparse_vector(query)
 
-        # Extract keywords for metadata filtering
-        keywords = self.keyword_extractor.extract(query)
+        # Optional keyword extraction (currently unused)
 
         all_results = []
 
         # Search with different strategies across namespaces
-        for namespace in self.config.search_namespaces:
+        for namespace in namespaces or self.config.search_namespaces:
             # Standard hybrid search
             matches = self.storage.query(
                 query_vector=query_embedding,
@@ -546,22 +604,14 @@ class NamespaceAwareRetriever(PineconeRetriever):
         self.similarity_calc = similarity_calc
         self.hybrid_retriever = HybridPineconeRetriever(storage, config, embedder, similarity_calc)
 
-    async def retrieve(self, query: str, top_k: int = 5) -> list[RetrievalResult]:
+    async def retrieve(self, query: str, top_k: int = 5, namespaces: list[str] | None = None) -> list[RetrievalResult]:
         """Intelligently retrieve from appropriate namespaces"""
-        start_time = datetime.now()
 
-        # Determine best namespaces based on query characteristics
-        namespaces = self._select_namespaces(query)
-
-        # Temporarily update config
-        original_namespaces = self.config.search_namespaces
-        self.config.search_namespaces = namespaces
+        # Determine best namespaces based on query unless explicitly provided
+        namespaces = namespaces or self._select_namespaces(query)
 
         # Use hybrid retriever with selected namespaces
-        results = await self.hybrid_retriever.retrieve(query, top_k)
-
-        # Restore original config
-        self.config.search_namespaces = original_namespaces
+        results = await self.hybrid_retriever.retrieve(query, top_k, namespaces=namespaces)
 
         # Update strategy name
         for result in results:
@@ -606,16 +656,16 @@ class CascadingPineconeRetriever(PineconeRetriever):
         self.hybrid_retriever = HybridPineconeRetriever(storage, config, embedder, similarity_calc)
         self.namespace_retriever = NamespaceAwareRetriever(storage, config, embedder, similarity_calc)
 
-    async def retrieve(self, query: str, top_k: int = 5) -> list[RetrievalResult]:
+    async def retrieve(self, query: str, top_k: int = 5, namespaces: list[str] | None = None) -> list[RetrievalResult]:
         """Multi-stage cascading retrieval"""
         start_time = datetime.now()
 
         # Stage 1: Get initial candidates from namespace-aware retrieval
-        candidates = await self.namespace_retriever.retrieve(query, self.config.max_candidates)
+        candidates = await self.namespace_retriever.retrieve(query, self.config.max_candidates, namespaces=namespaces)
 
         if not candidates:
             # Fallback to hybrid retrieval
-            candidates = await self.hybrid_retriever.retrieve(query, self.config.max_candidates)
+            candidates = await self.hybrid_retriever.retrieve(query, self.config.max_candidates, namespaces=namespaces)
 
         if not candidates:
             return []
@@ -734,11 +784,9 @@ class MemppRetrievalPipeline:
         self.retrieval_stats["total_queries"] += 1
         self.retrieval_stats["strategy_usage"][strategy.name] += 1
 
-        # Override namespace if specified
-        original_namespaces: list[str] | None = None
+        # Determine namespaces for this call without mutating shared config
+        call_namespaces: list[str] | None = [namespace] if namespace else None
         if namespace:
-            original_namespaces = self.config.search_namespaces
-            self.config.search_namespaces = [namespace]
             self.retrieval_stats["namespace_usage"][namespace] += 1
 
         # Check cache if enabled
@@ -748,8 +796,6 @@ class MemppRetrievalPipeline:
             if cached_results:
                 self.retrieval_stats["cache_hits"] += 1
                 logger.info(f"Cache hit for query: {query[:50]}...")
-                if original_namespaces is not None:
-                    self.config.search_namespaces = original_namespaces
                 return cached_results
             self.retrieval_stats["cache_misses"] += 1
 
@@ -768,11 +814,7 @@ class MemppRetrievalPipeline:
             logger.warning(f"Unknown strategy {strategy}, using default")
             retriever = self.retrievers[RetrievalStrategy.HYBRID]
 
-        results = await retriever.retrieve(query, top_k)
-
-        # Restore original namespaces
-        if original_namespaces is not None:
-            self.config.search_namespaces = original_namespaces
+        results = await retriever.retrieve(query, top_k, namespaces=call_namespaces)
 
         # Augment with external patterns if available
         if external_patterns:
@@ -785,9 +827,13 @@ class MemppRetrievalPipeline:
         # Update statistics
         if results:
             avg_time = np.mean([r.retrieval_time for r in results])
-            self.retrieval_stats["average_retrieval_time"] = float(
-                self.retrieval_stats["average_retrieval_time"] * (self.retrieval_stats["total_queries"] - 1) + avg_time
-            ) / self.retrieval_stats["total_queries"]
+            self.retrieval_stats["average_retrieval_time"] = (
+                float(
+                    self.retrieval_stats["average_retrieval_time"] * (self.retrieval_stats["total_queries"] - 1)
+                    + avg_time
+                )
+                / self.retrieval_stats["total_queries"]
+            )
 
         logger.info(f"Retrieved {len(results)} memories using {strategy.name}")
         return results
@@ -874,7 +920,7 @@ class MemppRetrievalPipeline:
         }
 
     async def optimize_retrieval_strategy(
-        self, test_queries: list[str], ground_truth: list[str] | None = None
+        self, test_queries: list[str], _ground_truth: list[str] | None = None
     ) -> dict[str, Any]:
         """Optimize retrieval strategy based on test queries"""
 

@@ -7,10 +7,47 @@ from datetime import datetime
 from enum import Enum, auto
 from typing import Any
 
-import anthropic
+try:
+    import anthropic  # type: ignore
+except Exception:  # pragma: no cover
+    anthropic = None  # type: ignore
+
 import numpy as np
-from prometheus_client import Counter, Gauge, Histogram
-from sklearn.cluster import DBSCAN
+
+# Optional metrics
+try:
+    from prometheus_client import Counter, Gauge, Histogram  # type: ignore
+except Exception:  # pragma: no cover
+    from typing import Any
+
+    class _Metric:
+        def labels(self, *_a: Any, **_k: Any) -> "_Metric":
+            return self
+
+        def inc(self, *_a: Any, **_k: Any) -> None:
+            pass
+
+        def set(self, *_a: Any, **_k: Any) -> None:
+            pass
+
+        def observe(self, *_a: Any, **_k: Any) -> None:
+            pass
+
+    def Counter(*_a: Any, **_k: Any) -> _Metric:  # type: ignore
+        return _Metric()
+
+    def Gauge(*_a: Any, **_k: Any) -> _Metric:  # type: ignore
+        return _Metric()
+
+    def Histogram(*_a: Any, **_k: Any) -> _Metric:  # type: ignore
+        return _Metric()
+
+
+# Optional clustering
+try:
+    from sklearn.cluster import DBSCAN  # type: ignore
+except Exception:  # pragma: no cover
+    DBSCAN = None  # type: ignore
 
 # Import from previous components
 from mempp.build import (
@@ -103,7 +140,12 @@ class ReflectionEngine:
     """Engine for reflecting on and correcting failed experiences"""
 
     def __init__(self, llm_client: Any | None = None) -> None:
-        self.llm_client = llm_client or anthropic.Anthropic()
+        if llm_client is not None:
+            self.llm_client = llm_client
+        elif anthropic is not None:
+            self.llm_client = anthropic.Anthropic()
+        else:
+            self.llm_client = None
         self.reflection_history: deque[dict[str, Any]] = deque(maxlen=100)
 
     async def reflect_on_failure(
@@ -136,6 +178,8 @@ class ReflectionEngine:
         """
 
         try:
+            if not self.llm_client:
+                raise RuntimeError("LLM client unavailable")
             response = self.llm_client.messages.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=1000,
@@ -197,6 +241,8 @@ class ReflectionEngine:
         Generate a corrected script that addresses these issues.
         """
 
+        if not self.llm_client:
+            return memory
         response = self.llm_client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=500,
@@ -378,7 +424,9 @@ class PineconeMemoryConsolidator:
 
         embeddings_array = np.array(embeddings)
 
-        # Use DBSCAN for clustering
+        # Use DBSCAN for clustering if available
+        if DBSCAN is None:  # type: ignore[truthy-bool]
+            return []
         clustering = DBSCAN(eps=1 - self.similarity_threshold, min_samples=2, metric="cosine").fit(embeddings_array)
 
         # Group memories by cluster
@@ -737,14 +785,14 @@ class PineconeVanillaUpdateExecutor(PineconeUpdateExecutor):
     async def execute(
         self,
         storage: PineconeMemoryStorage,
-        memories_to_update: list[ProceduralMemory],
-        context: dict[str, Any],
+        _memories_to_update: list[ProceduralMemory],
+        _context: dict[str, Any],
     ) -> list[UpdateResult]:
         """Add all memories without filtering"""
 
         results = []
 
-        for memory in memories_to_update:
+        for memory in _memories_to_update:
             try:
                 # Determine namespace based on memory type
                 if isinstance(memory, TrajectoryMemory):
@@ -922,8 +970,8 @@ class PineconeConsolidationUpdateExecutor(PineconeUpdateExecutor):
     async def execute(
         self,
         storage: PineconeMemoryStorage,
-        memories_to_update: list[ProceduralMemory],
-        context: dict[str, Any],
+        _memories_to_update: list[ProceduralMemory],
+        _context: dict[str, Any],
     ) -> list[UpdateResult]:
         """Find and consolidate similar memories within namespaces"""
 
@@ -987,8 +1035,8 @@ class PineconePruningUpdateExecutor(PineconeUpdateExecutor):
     async def execute(
         self,
         storage: PineconeMemoryStorage,
-        memories_to_update: list[ProceduralMemory],
-        context: dict[str, Any],
+        _memories_to_update: list[ProceduralMemory],
+        _context: dict[str, Any],
     ) -> list[UpdateResult]:
         """Remove unhealthy memories from each namespace"""
 
@@ -1078,6 +1126,7 @@ class MemppUpdatePipeline:
 
         # Continuous learning state
         self.learning_enabled = self.config.continuous_learning
+        self._learning_task: asyncio.Task[None] | None = None
         self.last_update_time = datetime.now()
 
         # Metrics
@@ -1317,12 +1366,18 @@ class MemppUpdatePipeline:
     def enable_continuous_learning(self) -> None:
         """Enable continuous learning"""
         self.learning_enabled = True
-        asyncio.create_task(self.continuous_learning_cycle())
+        # Cancel any prior task before (re)starting
+        if self._learning_task and not self._learning_task.done():
+            self._learning_task.cancel()
+        self._learning_task = asyncio.create_task(self.continuous_learning_cycle())
         logger.info("Continuous learning enabled")
 
     def disable_continuous_learning(self) -> None:
         """Disable continuous learning"""
         self.learning_enabled = False
+        if self._learning_task and not self._learning_task.done():
+            self._learning_task.cancel()
+        self._learning_task = None
         logger.info("Continuous learning disabled")
 
 

@@ -13,12 +13,16 @@ import numpy as np
 
 
 class TaskStatus(Enum):
+    """Completion status of a task/trajectory."""
+
     SUCCESS = auto()
     FAILURE = auto()
     PARTIAL = auto()
 
 
 class ActionType(Enum):
+    """Kinds of actions recorded in trajectories."""
+
     PLANNING = auto()
     TOOL_USE = auto()
     OBSERVATION = auto()
@@ -26,12 +30,16 @@ class ActionType(Enum):
 
 @dataclass
 class State:
+    """Environment state snapshot."""
+
     content: str
     timestamp: datetime
 
 
 @dataclass
 class Action:
+    """Action taken by the agent."""
+
     action_type: ActionType
     content: str
     timestamp: datetime
@@ -39,6 +47,8 @@ class Action:
 
 @dataclass
 class Observation:
+    """Observation after an action plus optional reward."""
+
     content: str
     timestamp: datetime
     reward: float = 0.0
@@ -46,6 +56,8 @@ class Observation:
 
 @dataclass
 class Trajectory:
+    """Full interaction roll‑out for a task."""
+
     task_id: str
     task_description: str
     states: list[State]
@@ -61,6 +73,8 @@ class Trajectory:
 
 @dataclass
 class ProceduralMemory:
+    """Base memory type: stores task pattern + embeddings + stats."""
+
     memory_id: str
     task_pattern: str
     embedding: np.ndarray
@@ -79,6 +93,8 @@ class ProceduralMemory:
 
 @dataclass
 class TrajectoryMemory(ProceduralMemory):
+    """Stores original trajectory plus extracted key elements."""
+
     trajectory: Trajectory = field(default_factory=lambda: Trajectory("", "", [], [], [], TaskStatus.PARTIAL, 0.0))
     key_states: list[str] = field(default_factory=list)
     critical_actions: list[str] = field(default_factory=list)
@@ -86,6 +102,8 @@ class TrajectoryMemory(ProceduralMemory):
 
 @dataclass
 class ScriptMemory(ProceduralMemory):
+    """Stores an abstract procedural script and related structure."""
+
     script: str = ""
     steps: list[str] = field(default_factory=list)
     preconditions: list[str] = field(default_factory=list)
@@ -95,6 +113,8 @@ class ScriptMemory(ProceduralMemory):
 
 @dataclass
 class ProceduralizedMemory(ProceduralMemory):
+    """Combined trajectory + script memory optimized for retrieval."""
+
     trajectory: Trajectory | None = None
     script: str = ""
     abstraction_level: float = 0.0
@@ -105,7 +125,10 @@ class ProceduralizedMemory(ProceduralMemory):
 
 
 class EmbeddingModel(Protocol):
+    """Protocol for embedding models returning (n, d) arrays."""
+
     def encode(self, texts: Sequence[str] | str) -> np.ndarray:  # (n, d)
+        """Encode text(s) into dense vectors."""
         ...
 
 
@@ -121,6 +144,7 @@ class MultilingualE5Embedder:
         self.dimension = dimension
 
     def _hash_to_vec(self, text: str) -> np.ndarray:
+        """Map a string to a deterministic unit vector using SHA256 as seed."""
         h = hashlib.sha256(text.encode("utf-8")).digest()
         # Expand deterministically to the target dimension
         rng_seed = int.from_bytes(h[:8], "big", signed=False) % (2**32)
@@ -131,6 +155,7 @@ class MultilingualE5Embedder:
         return (v / norm).astype(np.float32)
 
     def encode(self, texts: Sequence[str] | str) -> np.ndarray:
+        """Encode a string or list of strings into normalized vectors."""
         if isinstance(texts, str):
             texts = [texts]
         mat = np.stack([self._hash_to_vec(t) for t in texts], axis=0)

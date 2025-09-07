@@ -6,14 +6,14 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # Only for type-checkers
-    from .system import MemppSystemConfig
+    from .config import MemppSystemConfig
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"
 
 
 def _build_config() -> MemppSystemConfig:
-    # Lazy import to avoid importing heavy deps on simple CLI calls
-    from .system import MemppSystemConfig
+    # Import from lightweight config module to avoid heavy deps for CLI
+    from .config import MemppSystemConfig
 
     return MemppSystemConfig(
         pinecone_api_key=os.getenv("PINECONE_API_KEY", "dev-key"),
@@ -24,7 +24,7 @@ def _build_config() -> MemppSystemConfig:
 
 def main(argv: list[str] | None = None) -> None:
     """Tiny CLI that prints environment-derived config and version."""
-    parser = argparse.ArgumentParser(prog="mempp", description="Memp procedural memory sandbox CLI")
+    parser = argparse.ArgumentParser(prog="mempp", description="Mempp procedural memory sandbox CLI")
     parser.add_argument("command", nargs="?", default="info", choices=["info"])  # keep minimal
     args = parser.parse_args(argv)
 

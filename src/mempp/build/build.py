@@ -290,10 +290,10 @@ class MemoryBuilder(ABC):
 
         # Fallback: SparseVector-like object with indices/values
         if hasattr(raw, "indices") and hasattr(raw, "values"):
-            indices = getattr(raw, "indices")
-            values = getattr(raw, "values")
+            indices = raw.indices
+            values = raw.values
             try:
-                return {str(i): float(v) for i, v in zip(indices, values)}
+                return {str(i): float(v) for i, v in zip(indices, values, strict=False)}
             except Exception:
                 return {}
 
@@ -766,7 +766,12 @@ class MemppBuildPipeline:
             self.embedder, self.sparse_encoder, self.trajectory_builder, self.script_builder
         )
 
-        self.build_stats: dict[str, Any] = {"total_processed": 0, "successful_builds": 0, "failed_builds": 0, "build_times": []}
+        self.build_stats: dict[str, Any] = {
+            "total_processed": 0,
+            "successful_builds": 0,
+            "failed_builds": 0,
+            "build_times": [],
+        }
 
     async def build_from_trajectory(
         self, trajectory: Trajectory, strategy: str = "proceduralization"

@@ -1,9 +1,10 @@
+from mempp.config import MemppSystemConfig
+
 from .system import (
     EventBus,
     EventType,
     MemppSystem,
     MemppSystemAPI,
-    MemppSystemConfig,
     SystemEvent,
     TaskRequest,
     TaskResponse,
